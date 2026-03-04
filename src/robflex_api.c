@@ -36,13 +36,9 @@ int send_command_to_daemon(const char *cmd_json) {
 int robflex_set_scheduler(pid_t tid, int policy, int priority) {
     char cmd_json[MAX_JSON_SIZE];
 
-    if(!tid){
-        tid = gettid();
-    }
-
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "cmd", "sched_setscheduler");
-    cJSON_AddNumberToObject(root, "tid", tid);
+    cJSON_AddNumberToObject(root, "tid", tid? tid : gettid());
     cJSON_AddNumberToObject(root, "policy", policy);
     cJSON_AddNumberToObject(root, "priority", priority);
 
@@ -58,13 +54,9 @@ int robflex_set_scheduler(pid_t tid, int policy, int priority) {
 int robflex_set_priority(pid_t tid, int priority) {
     char cmd_json[MAX_JSON_SIZE];
 
-    if(!tid){
-        tid = gettid();
-    }
-
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "cmd", "set_priority");
-    cJSON_AddNumberToObject(root, "tid", tid);
+    cJSON_AddNumberToObject(root, "tid", tid? tid : gettid());
     cJSON_AddNumberToObject(root, "priority", priority);
 
     char *cmd_str = cJSON_PrintUnformatted(root);
@@ -104,4 +96,21 @@ int robflex_log_message(pid_t tid, const char *message, ...) {
     return result;
 }
 
+int robflex_update_ctrl_time_cost(pid_t tid, int value_in_ms) {
+    char cmd_json[MAX_JSON_SIZE];
+    int result = -1;
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "cmd", "update_ctrl_time_cost");
+    cJSON_AddNumberToObject(root, "tid", tid? tid : gettid());
+    cJSON_AddNumberToObject(root, "value_in_ms", value_in_ms);
+
+    char *cmd_str = cJSON_PrintUnformatted(root);
+    result = send_command_to_daemon(cmd_str);
+
+    cJSON_Delete(root);
+    free(cmd_str);
+
+    return result;
+}
 

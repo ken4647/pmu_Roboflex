@@ -7,3 +7,4 @@
 
 export LD_PRELOAD=$(pwd)/build/librobonix.so
 export ROBFLEX_ENABLE_FEATURES=1
+export ROBFLEX_INSTRUCTION_SLICE_1M=20

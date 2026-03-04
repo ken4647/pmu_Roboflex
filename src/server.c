@@ -32,6 +32,24 @@ struct UnixSocketServer {
     struct sockaddr_un addr;
 };
 
+int check_capability(cap_value_t cap) {
+    cap_t caps = cap_get_proc();
+    if (caps == NULL) {
+        perror("cap_get_proc");
+        return -1;
+    }
+
+    cap_flag_value_t has_cap;
+    if (cap_get_flag(caps, cap, CAP_EFFECTIVE, &has_cap) == -1) {
+        perror("cap_get_flag");
+        cap_free(caps);
+        return -1;
+    }
+
+    cap_free(caps);
+    return has_cap == CAP_SET ? 0 : -1;
+}
+
 int setup_unix_socket(struct UnixSocketServer *server) {
     // 创建Unix Socket
     server->socket_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
@@ -114,6 +132,22 @@ int do_log_message(const cJSON *root) {
     return 0;
 }
 
+int do_update_ctrl_time_cost(const cJSON *root) {
+    cJSON *tid = cJSON_GetObjectItem(root, "tid");
+    cJSON *value_in_ms = cJSON_GetObjectItem(root, "value_in_ms");
+    if (!value_in_ms || !tid) {
+        fprintf(stderr, "Missing required fields for update_ctrl_time_cost\n");
+        return -1;
+    }
+
+    // 发送信号给对应线程，触发cpi_set_interrupt_handler更新全局原子变量ctrl_time_cost_ns
+    printf("Updated tid:%d control time cost to %d ms\n", tid->valueint, value_in_ms->valueint);
+
+    union sigval val;
+    val.sival_int = value_in_ms->valueint; // 设置 CPI 值
+    return sigqueue(tid->valueint, CPI_SET_SIGNAL, val);
+}
+
 int cmd_dispatcher(const cJSON *root) {
     cJSON *cmd = cJSON_GetObjectItem(root, "cmd");
     if (!cmd) {
@@ -127,6 +161,8 @@ int cmd_dispatcher(const cJSON *root) {
         return do_set_priority(root);
     } else if (strcmp(cmd->valuestring, "log_message") == 0) {
         return do_log_message(root);
+    } else if (strcmp(cmd->valuestring, "update_ctrl_time_cost") == 0) {
+        return do_update_ctrl_time_cost(root);
     } else {
         fprintf(stderr, "Unknown command: %s\n", cmd->valuestring);
         return -1;
@@ -164,25 +200,6 @@ void handle_client_request(struct UnixSocketServer *server) {
     return;
 }
 
-
-int check_capability(cap_value_t cap) {
-    cap_t caps = cap_get_proc();
-    if (caps == NULL) {
-        perror("cap_get_proc");
-        return -1;
-    }
-
-    cap_flag_value_t has_cap;
-    if (cap_get_flag(caps, cap, CAP_EFFECTIVE, &has_cap) == -1) {
-        perror("cap_get_flag");
-        cap_free(caps);
-        return -1;
-    }
-
-    cap_free(caps);
-    return has_cap == CAP_SET ? 0 : -1;
-}
-
 int main() {
     struct UnixSocketServer server;
     
@@ -203,6 +220,12 @@ int main() {
         return 1;
     }
 
+    // 设置当前线程为FIFO策略
+    if (sched_setscheduler(0, SCHED_FIFO, &(struct sched_param){.sched_priority = 10}) != 0) {
+        perror("sched_setscheduler");
+    }
+
+    printf("Ready to receive requests:\n");
     while(1){
         handle_client_request(&server);
     }

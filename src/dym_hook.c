@@ -25,6 +25,15 @@ __thread int perf_fd = 0;
 __thread volatile int interrupt_count = 0;
 __thread volatile int timer_count = 0;
 __thread struct timespec start_time;
+// process-wide granular control time cost, can be updated by env ROBFLEX_PERF_CTRL_CPI_ENV or API set_perf_ctrl_cpi_atomic
+atomic_ullong ctrl_time_cost_ns = DEFUALT_TIME_COST_PER_INTERRUPT_NS; 
+inline void set_perf_ctrl_cpi_atomic(int value_in_ms) {
+    atomic_store(&ctrl_time_cost_ns, max(1, value_in_ms) * 1000 * 1000);
+}
+
+inline unsigned long long get_perf_ctrl_cpi_atomic() {
+    return atomic_load(&ctrl_time_cost_ns);
+}
 
 // perf_event_open 系统调用包装
 static int perf_event_open(struct perf_event_attr *attr, pid_t pid,
@@ -45,33 +54,57 @@ static inline uint64_t get_time_ns() {
 
 // 可以考虑换成ptrace来实现，先忽略函数是否为signal_safe
 __thread uint64_t past, now, diff;
-__thread uint64_t avg_timecost_ns = 0;
+__thread uint64_t avg_timecost_ns = DEFUALT_TIME_COST_PER_INTERRUPT_NS;
 void instruction_interrupt_handler(int signo, siginfo_t *info, void *context) {
     interrupt_count++;
 
-    const uint64_t target_time_ns = 10 * 1000 * 1000;  // 1ms = 1,000,000 纳秒
+    const uint64_t target_time_ns = get_perf_ctrl_cpi_atomic();  // 1ms = 1,000,000 纳秒
 
     now = get_time_ns();
     diff = now - past;
 
-    // printf("diff: %lld\n", diff/(1000*1000));
-    
     if (diff < target_time_ns) {
         // 休眠补足剩余时间
         struct timespec sleep_ts;
         sleep_ts.tv_sec = 0;
         sleep_ts.tv_nsec = target_time_ns - diff;
-        // printf("sleep: %ld us\n", sleep_ts.tv_nsec/1000);
         
         nanosleep(&sleep_ts, NULL);
     } 
-
 
     avg_timecost_ns = avg_timecost_ns * 0.9 + diff * 0.1;  // 简单的指数移动平均
     past = get_time_ns();
 
     // 重要：重置计数器，否则只会触发一次
     ioctl(perf_fd, PERF_EVENT_IOC_RESET, 0);
+}
+
+// 处理用户态设置 CPI 目标值的信号处理器
+void cpi_set_interrupt_handler(int signo, siginfo_t *info, void *context) {
+    if (signo == CPI_SET_SIGNAL) {
+        int new_cpi = info->si_int;  // 假设通过 si_int 传递新的 CPI 目标值
+        set_perf_ctrl_cpi_atomic(new_cpi);
+        robflex_log_message(gettid(), "Updated CPI control to %d million instructions", new_cpi);
+    }
+}
+
+int setup_param_recver() {
+    // 暂时只需要处理极低频的数据，所以同样用实时信号的方式来实现
+    
+    // CPI_SET_SIGNAL 用于接收用户态设置的 CPI 目标值, 通过 set_perf_ctrl_cpi_atomic 接口更新全局原子变量 ctrl_time_cost_ns
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = cpi_set_interrupt_handler;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+
+    // 注册 CPI_SET_SIGNAL 的信号处理器
+    if (sigaction(CPI_SET_SIGNAL, &sa, NULL) < 0) {
+        perror("sigaction for CPI_SET_SIGNAL");
+        return 1;
+    }
+
+    return 0;
 }
 
 int setup_perf_ctrl() {
@@ -87,10 +120,10 @@ int setup_perf_ctrl() {
     memset(&attr, 0, sizeof(attr));
     attr.type = PERF_TYPE_HARDWARE;
     attr.size = sizeof(attr);
-    attr.config = PERF_COUNT_HW_INSTRUCTIONS;
+    attr.config = PERF_COUNT_HW_CPU_CYCLES;
 
     // 关键配置：采样模式
-    attr.sample_period = 50*1000*1000ULL;  // 每5000万条指令采样一次
+    attr.sample_period = get_instr_slice();  // 每5000万条指令采样一次
     attr.sample_type = PERF_SAMPLE_IP;
     attr.freq = 0;  // 0表示使用period，1表示使用freq
     
@@ -158,7 +191,7 @@ void perf_ctrl_cleanup() {
 
 int set_high_nice() {
     robflex_set_scheduler(gettid(), SCHED_OTHER, -20);
-    // robflex_set_scheduler(gettid(), SCHED_FIFO, 10);
+    // robflex_set_scheduler(gettid(), SCHED_RR, 10);
 
     return 0;
 }
@@ -167,6 +200,7 @@ int setup_robflex_if_enabled() {
     if (is_robflex_enabled()) {
         set_high_nice();
         setup_perf_ctrl();
+        setup_param_recver();
     }
 }
 
@@ -192,6 +226,7 @@ struct wrapper_arg {
 static void *thread_start_wrapper(void *arg)
 {
     struct wrapper_arg *w = arg;
+
 
     setup_robflex_if_enabled();
     
@@ -236,8 +271,27 @@ pid_t fork(void)
     return pid;
 }
 
-static int (*real_clone)(int (*fn)(void *), void *child_stack,
-                         int flags, void *arg, ...);
+struct clone_wrapper_arg {
+    int (*fn)(void *);
+    void *arg;
+};
+
+static int clone_start_wrapper(void *arg)
+{
+    struct clone_wrapper_arg *w = arg;
+
+    setup_robflex_if_enabled();
+
+    int ret = w->fn(w->arg);
+
+    perf_ctrl_cleanup();
+
+    free(w);
+
+    return ret;
+}
+
+static int (*real_clone)(int (*)(void *), void *, int, void *, ...) = NULL;
 
 int clone(int (*fn)(void *), void *child_stack,
           int flags, void *arg, ...)
@@ -245,14 +299,43 @@ int clone(int (*fn)(void *), void *child_stack,
     if (!real_clone)
         real_clone = dlsym(RTLD_NEXT, "clone");
 
-    int pid = real_clone(fn, child_stack, flags, arg);
-
-    // 如果不是线程 clone，而是新进程
     if (!(flags & CLONE_THREAD)) {
+        int pid =  real_clone(fn, child_stack, flags, arg);
         if (pid == 0) {
             setup_robflex_if_enabled();
         }
+        return pid;        
     }
 
-    return pid;
+    struct clone_wrapper_arg *w = malloc(sizeof(*w));
+    w->fn = fn;
+    w->arg = arg;
+
+    va_list ap;
+    va_start(ap, arg);
+
+    void *ptid = NULL;
+    void *tls  = NULL;
+    void *ctid = NULL;
+
+    if (flags & CLONE_PARENT_SETTID)
+        ptid = va_arg(ap, void *);
+
+    if (flags & CLONE_SETTLS)
+        tls = va_arg(ap, void *);
+
+    if (flags & CLONE_CHILD_SETTID)
+        ctid = va_arg(ap, void *);
+
+    va_end(ap);
+
+    return real_clone(
+        clone_start_wrapper,
+        child_stack,
+        flags,
+        w,
+        ptid,
+        tls,
+        ctid
+    );
 }
