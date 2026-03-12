@@ -1,0 +1,6 @@
+tasks:
+  - name: "Task_A"
+    cmd: "bash script/run_taskA_pmu.sh" # 模拟高 CPU 占用
+  - name: "Task_B"
+    cmd: "bash script/run_taskB_pmu.sh"
+duration: 1 # 监控总时长（秒）

@@ -1,8 +1,6 @@
 # !/bin/bash
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
-# unset ROBFLEX_ENABLE_ENV
 source ${_SCRIPT_DIR}/deactivate.sh
 
-# startup the daemon
-${_SCRIPT_DIR}/../build/robonix_daemon
+${_SCRIPT_DIR}/../build/proc_stat

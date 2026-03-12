@@ -134,17 +134,17 @@ int do_log_message(const cJSON *root) {
 
 int do_update_ctrl_time_cost(const cJSON *root) {
     cJSON *tid = cJSON_GetObjectItem(root, "tid");
-    cJSON *value_in_ms = cJSON_GetObjectItem(root, "value_in_ms");
-    if (!value_in_ms || !tid) {
+    cJSON *value_in_us = cJSON_GetObjectItem(root, "value_in_us");
+    if (!value_in_us || !tid) {
         fprintf(stderr, "Missing required fields for update_ctrl_time_cost\n");
         return -1;
     }
 
     // 发送信号给对应线程，触发cpi_set_interrupt_handler更新全局原子变量ctrl_time_cost_ns
-    printf("Updated tid:%d control time cost to %d ms\n", tid->valueint, value_in_ms->valueint);
+    printf("Updated tid:%d control time cost to %d ms\n", tid->valueint, value_in_us->valueint);
 
     union sigval val;
-    val.sival_int = value_in_ms->valueint; // 设置 CPI 值
+    val.sival_int = value_in_us->valueint; // 设置 CPI 值
     return sigqueue(tid->valueint, CPI_SET_SIGNAL, val);
 }
 

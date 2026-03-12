@@ -61,6 +61,14 @@ else()
     )
 endif()
 
+add_executable(proc_stat
+    src/proc_stat.c
+)
+
+target_link_libraries(proc_stat
+    rt
+)
+
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()

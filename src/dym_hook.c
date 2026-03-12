@@ -21,14 +21,16 @@
 #include <robflex_api.h>
 
 
+void* _init_shmem_data(const char *shmem_name);
+
 __thread int perf_fd = 0;
 __thread volatile int interrupt_count = 0;
 __thread volatile int timer_count = 0;
 __thread struct timespec start_time;
 // process-wide granular control time cost, can be updated by env ROBFLEX_PERF_CTRL_CPI_ENV or API set_perf_ctrl_cpi_atomic
 atomic_ullong ctrl_time_cost_ns = DEFUALT_TIME_COST_PER_INTERRUPT_NS; 
-inline void set_perf_ctrl_cpi_atomic(int value_in_ms) {
-    atomic_store(&ctrl_time_cost_ns, max(1, value_in_ms) * 1000 * 1000);
+inline void set_perf_ctrl_cpi_atomic(int value_in_us) {
+    atomic_store(&ctrl_time_cost_ns, max(1, value_in_us) * 1000);
 }
 
 inline unsigned long long get_perf_ctrl_cpi_atomic() {
@@ -45,7 +47,7 @@ pid_t gettid() {
     return syscall(__NR_gettid);
 }
 
-static inline uint64_t get_time_ns() {
+uint64_t get_time_ns() {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
@@ -59,18 +61,24 @@ void instruction_interrupt_handler(int signo, siginfo_t *info, void *context) {
     interrupt_count++;
 
     const uint64_t target_time_ns = get_perf_ctrl_cpi_atomic();  // 1ms = 1,000,000 纳秒
+    enum SystemBusyDegree busy_degree = robflex_system_busy_degree();
 
     now = get_time_ns();
     diff = now - past;
 
-    if (diff < target_time_ns) {
+    if (diff < target_time_ns && busy_degree == SYSTEM_HIGH) {
         // 休眠补足剩余时间
         struct timespec sleep_ts;
         sleep_ts.tv_sec = 0;
         sleep_ts.tv_nsec = target_time_ns - diff;
         
         nanosleep(&sleep_ts, NULL);
-    } 
+    } else if (diff < target_time_ns && busy_degree == SYSTEM_MODERATE) {
+        // 仅仅让出CPU
+        sched_yield();
+    } else {
+        // 不休眠，继续执行直到底层调度策略让出CPU
+    }
 
     avg_timecost_ns = avg_timecost_ns * 0.9 + diff * 0.1;  // 简单的指数移动平均
     past = get_time_ns();
@@ -198,6 +206,7 @@ int set_high_nice() {
 
 int setup_robflex_if_enabled() {
     if (is_robflex_enabled()) {
+        _init_shmem_data(SHMEM_NAME);
         set_high_nice();
         setup_perf_ctrl();
         setup_param_recver();

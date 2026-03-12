@@ -130,10 +130,10 @@ def robflex_log_message(tid: int, message: str, *args: Any) -> int:
     
     return _send_command_to_daemon(payload)
 
-def robflex_update_ctrl_time_cost(tid: int, value_in_ms: int) -> int:
+def robflex_update_ctrl_time_cost(tid: int, value_in_us: int) -> int:
     """
     更新控制时间成本
-    对应 C: int robflex_update_ctrl_time_cost(pid_t tid, int value_in_ms)
+    对应 C: int robflex_update_ctrl_time_cost(pid_t tid, int value_in_us)
     """
     if tid == 0:
         tid = os.gettid()
@@ -141,7 +141,7 @@ def robflex_update_ctrl_time_cost(tid: int, value_in_ms: int) -> int:
     payload = {
         "cmd": "update_ctrl_time_cost",
         "tid": tid,
-        "value_in_ms": value_in_ms
+        "value_in_us": value_in_us
     }
     
     return _send_command_to_daemon(payload)

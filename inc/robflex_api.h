@@ -36,7 +36,16 @@ inline bool is_robflex_enabled() {
 int robflex_set_scheduler(pid_t tid, int policy, int priority);
 int robflex_set_priority(pid_t tid, int priority);
 int robflex_log_message(pid_t tid, const char *message, ...);
-int robflex_update_ctrl_time_cost(pid_t tid, int value_in_ms);
+int robflex_update_ctrl_time_cost(pid_t tid, int value_in_us);
 
+// local context management
+int robflex_reset_local_context();
+int robflex_update_local_context();
+int robflex_start_cirtical_path();
+int robflex_finish_cirtical_path();
+
+// system context management
+int robflex_get_sys_context();
+enum SystemBusyDegree robflex_system_busy_degree();
 
 #endif // ROBFLEX_API_H

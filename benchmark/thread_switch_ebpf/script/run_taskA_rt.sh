@@ -1,0 +1,1 @@
+exec ./build/taskA 1
