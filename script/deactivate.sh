@@ -8,4 +8,4 @@
 # export LD_PRELOAD=$(pwd)/build/librobonix.so
 export ROBFLEX_ENABLE_FEATURES=0
 unset LD_PRELOAD
-unset ROBFLEX_INSTRUCTION_SLICE_1M
+unset ROBFLEX_CYCLES_NUM_IN_MILLION

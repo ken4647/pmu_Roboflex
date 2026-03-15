@@ -28,7 +28,7 @@ __thread volatile int interrupt_count = 0;
 __thread volatile int timer_count = 0;
 __thread struct timespec start_time;
 // process-wide granular control time cost, can be updated by env ROBFLEX_PERF_CTRL_CPI_ENV or API set_perf_ctrl_cpi_atomic
-atomic_ullong ctrl_time_cost_ns = DEFUALT_TIME_COST_PER_INTERRUPT_NS; 
+atomic_ullong ctrl_time_cost_ns = DEFUALT_PERIOD_TIME_IN_NS; 
 inline void set_perf_ctrl_cpi_atomic(int value_in_us) {
     atomic_store(&ctrl_time_cost_ns, max(1, value_in_us) * 1000);
 }
@@ -56,7 +56,9 @@ uint64_t get_time_ns() {
 
 // 可以考虑换成ptrace来实现，先忽略函数是否为signal_safe
 __thread uint64_t past, now, diff;
-__thread uint64_t avg_timecost_ns = DEFUALT_TIME_COST_PER_INTERRUPT_NS;
+__thread uint64_t avg_timecost_ns = DEFUALT_PERIOD_TIME_IN_NS;
+__thread long long time_budgets = 0;
+__thread uint64_t sleeped_time = 0;
 void instruction_interrupt_handler(int signo, siginfo_t *info, void *context) {
     interrupt_count++;
 
@@ -65,20 +67,34 @@ void instruction_interrupt_handler(int signo, siginfo_t *info, void *context) {
 
     now = get_time_ns();
     diff = now - past;
+    time_budgets += (long long)target_time_ns - (long long)diff;
+    // robflex_log_message(gettid(), "target_time_ns:%llu, diff:%llu, sub:%lld, time_budgets:%lld", target_time_ns, diff, (long long)target_time_ns - (long long)diff, time_budgets);
+    if (time_budgets>0){
+        if (1) {
+            uint64_t sleep_ns = min(time_budgets, target_time_ns);
 
-    if (diff < target_time_ns && busy_degree == SYSTEM_HIGH) {
-        // 休眠补足剩余时间
-        struct timespec sleep_ts;
-        sleep_ts.tv_sec = 0;
-        sleep_ts.tv_nsec = target_time_ns - diff;
-        
-        nanosleep(&sleep_ts, NULL);
-    } else if (diff < target_time_ns && busy_degree == SYSTEM_MODERATE) {
-        // 仅仅让出CPU
-        sched_yield();
-    } else {
-        // 不休眠，继续执行直到底层调度策略让出CPU
+            // 休眠补足剩余时间
+            struct timespec sleep_ts;
+            sleep_ts.tv_sec = 0;
+            sleep_ts.tv_nsec = sleep_ns;
+
+            time_budgets -= sleep_ns;
+            sleeped_time += sleep_ns;
+            
+            nanosleep(&sleep_ts, NULL);
+        } else if (busy_degree == SYSTEM_MODERATE) {
+            time_budgets = max(0, time_budgets+(long long)avg_timecost_ns-target_time_ns);
+
+            // 仅仅让出CPU
+            sched_yield();
+        } else { //idle
+            time_budgets = max(0, time_budgets+(long long)avg_timecost_ns-target_time_ns);
+
+            // 不休眠，继续执行直到底层调度策略让出CPU
+        }        
     }
+    time_budgets = min((long long)target_time_ns*3, time_budgets);
+    time_budgets = max(-(long long)target_time_ns, time_budgets);
 
     avg_timecost_ns = avg_timecost_ns * 0.9 + diff * 0.1;  // 简单的指数移动平均
     past = get_time_ns();
@@ -132,8 +148,9 @@ int setup_perf_ctrl() {
 
     // 关键配置：采样模式
     attr.sample_period = get_instr_slice();  // 每5000万条指令采样一次
-    attr.sample_type = PERF_SAMPLE_IP;
+    attr.sample_type = PERF_SAMPLE_TID;
     attr.freq = 0;  // 0表示使用period，1表示使用freq
+    attr.remove_on_exec = 1;
     
     // 启用中断
     attr.wakeup_events = 1;
@@ -188,7 +205,8 @@ int setup_perf_ctrl() {
 
 void perf_ctrl_cleanup() {
     if (perf_fd > 0) {
-        robflex_log_message(gettid(), "perf_ctrl_cleanup, with avg_timecost_ns: %lld us, interrupt times: %d", avg_timecost_ns/1000, interrupt_count);
+        robflex_log_message(gettid(), "target_ns:%llu, instr_cycles:%llu", get_perf_ctrl_cpi_atomic(), get_instr_slice());
+        robflex_log_message(gettid(), "perf_ctrl_cleanup, with avg_timecost_ns: %lld us, interrupt times: %d, sleeped time: %llu", avg_timecost_ns/1000, interrupt_count, sleeped_time);
 
         ioctl(perf_fd, PERF_EVENT_IOC_DISABLE, 0);
         close(perf_fd);

@@ -23,7 +23,7 @@ inline unsigned long long get_instr_slice(){
     if (env != NULL) {
         return max(1,strtoull(env, NULL, 10))*1000*1000;
     } else {
-        return DEFUALT_PERF_SIG_PER_INSTRUCTION; // default value (100 million instructions)
+        return DEFUALT_PERIOD_CYCLES_NUM; // default value (100 million instructions)
     }
 }
 

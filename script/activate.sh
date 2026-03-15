@@ -9,3 +9,4 @@
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 export LD_PRELOAD="${_SCRIPT_DIR}/../build/librobonix.so"
 export ROBFLEX_ENABLE_FEATURES=1
+# export ROBFLEX_CYCLES_NUM_IN_MILLION=1
