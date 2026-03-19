@@ -19,22 +19,27 @@
 #include <pthread.h>
 #include <robflex_def.h>
 #include <robflex_api.h>
+#include <stdatomic.h>
 
 
 void* _init_shmem_data(const char *shmem_name);
 
 __thread int perf_fd = 0;
+// 统计信息
 __thread volatile int interrupt_count = 0;
-__thread volatile int timer_count = 0;
-__thread struct timespec start_time;
-// process-wide granular control time cost, can be updated by env ROBFLEX_PERF_CTRL_CPI_ENV or API set_perf_ctrl_cpi_atomic
-atomic_ullong ctrl_time_cost_ns = DEFUALT_PERIOD_TIME_IN_NS; 
+__thread uint64_t sleeped_time = 0;
+__thread uint64_t avg_timecost_ns = DEFUALT_PERIOD_TIME_IN_NS;
+
+// 异步信号处理函数，负责主动控制程序的吞吐
+__thread LocalContext loc_ctx = {0};
+
+
 inline void set_perf_ctrl_cpi_atomic(int value_in_us) {
-    atomic_store(&ctrl_time_cost_ns, max(1, value_in_us) * 1000);
+    atomic_store(&loc_ctx.aux.norm.time_slice_ns, max(1, value_in_us) * 1000);
 }
 
 inline unsigned long long get_perf_ctrl_cpi_atomic() {
-    return atomic_load(&ctrl_time_cost_ns);
+    return atomic_load(&loc_ctx.aux.norm.time_slice_ns);
 }
 
 // perf_event_open 系统调用包装
@@ -53,24 +58,52 @@ uint64_t get_time_ns() {
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
-
-// 可以考虑换成ptrace来实现，先忽略函数是否为signal_safe
 __thread uint64_t past, now, diff;
-__thread uint64_t avg_timecost_ns = DEFUALT_PERIOD_TIME_IN_NS;
-__thread long long time_budgets = 0;
-__thread uint64_t sleeped_time = 0;
-void instruction_interrupt_handler(int signo, siginfo_t *info, void *context) {
-    interrupt_count++;
-
+void handle_tick_predetermined() {
     const uint64_t target_time_ns = get_perf_ctrl_cpi_atomic();  // 1ms = 1,000,000 纳秒
     enum SystemBusyDegree busy_degree = robflex_system_busy_degree();
+    struct YieldDemand* yd = &loc_ctx.aux.norm;
+
+    long long time_budgets = yd->time_budgets;
+
+    now = get_time_ns();
+    diff = now - past;
+
+    time_budgets += (long long)target_time_ns - (long long)diff;
+    if (time_budgets>0){
+        uint64_t sleep_ns = min(time_budgets, target_time_ns);
+
+        // 休眠补足剩余时间
+        struct timespec sleep_ts;
+        sleep_ts.tv_sec = 0;
+        sleep_ts.tv_nsec = sleep_ns;
+
+        time_budgets -= sleep_ns;
+        sleeped_time += sleep_ns;
+        nanosleep(&sleep_ts, NULL);
+    }
+
+    time_budgets = min((long long)target_time_ns*3, time_budgets);
+    time_budgets = max(-(long long)target_time_ns, time_budgets);
+
+    avg_timecost_ns = avg_timecost_ns * 0.9 + diff * 0.1;  // 简单的指数移动平均
+    yd->time_budgets = time_budgets;
+    past = get_time_ns();
+}
+
+void handle_tick_yielding() {
+    const uint64_t target_time_ns = get_perf_ctrl_cpi_atomic();  // 1ms = 1,000,000 纳秒
+    enum SystemBusyDegree busy_degree = robflex_system_busy_degree();
+    struct YieldDemand* yd = &loc_ctx.aux.norm;
+
+    long long time_budgets = yd->time_budgets;
 
     now = get_time_ns();
     diff = now - past;
     time_budgets += (long long)target_time_ns - (long long)diff;
     // robflex_log_message(gettid(), "target_time_ns:%llu, diff:%llu, sub:%lld, time_budgets:%lld", target_time_ns, diff, (long long)target_time_ns - (long long)diff, time_budgets);
     if (time_budgets>0){
-        if (1) {
+        if (busy_degree == SYSTEM_HIGH) {
             uint64_t sleep_ns = min(time_budgets, target_time_ns);
 
             // 休眠补足剩余时间
@@ -97,10 +130,91 @@ void instruction_interrupt_handler(int signo, siginfo_t *info, void *context) {
     time_budgets = max(-(long long)target_time_ns, time_budgets);
 
     avg_timecost_ns = avg_timecost_ns * 0.9 + diff * 0.1;  // 简单的指数移动平均
+    yd->time_budgets = time_budgets;
     past = get_time_ns();
+}
+
+void handle_tick_latency_oriented() {
+    enum SystemBusyDegree busy_degree = robflex_system_busy_degree();
+    now = get_time_ns();
+
+    struct LatencyDemand* ld = &loc_ctx.aux.lat;
+    uint64_t hist_ncycle = ld->hist_ncycle;
+    uint64_t used_ncycle = ld->used_ncycle;
+    uint64_t target_lat = ld->target_lat;
+    uint64_t start_time = ld->start_time;
+    uint64_t now = get_time_ns();
+    uint64_t cycle_slice = get_instr_slice();
+    uint64_t pass_ns = now - past;
+
+    long long diff_ncycle = (long long)hist_ncycle - (long long)used_ncycle + cycle_slice;
+    long long diff_time = (long long)now - (long long)start_time;
+    long long time_budgets = (long long)target_lat - diff_time;
+
+    ld->used_ncycle += cycle_slice;
+    if(time_budgets <= 1000000 || busy_degree == SYSTEM_IDLE) { // only x ms left, so full run
+        past = get_time_ns();
+        return;
+    }else if(busy_degree == SYSTEM_MODERATE){ // moderate busy, just yield
+        sched_yield();
+        past = get_time_ns();
+        return;
+    }
+
+    long long period_assume = 0;
+    if(diff_ncycle > 0) { // need to wait for next cycle
+        period_assume = time_budgets*cycle_slice/diff_ncycle;
+        // printf("period_assume: %llu, pass_ns: %llu, sleep_ns: %lld, time_budgets: %lld, hist_ncycle: %llu, cycle_slice: %llu\n", period_assume, pass_ns, period_assume - (long long)pass_ns - 1000000, time_budgets, hist_ncycle, cycle_slice);
+        long long sleep_ns = period_assume - (long long)pass_ns - 1000000;
+        if(sleep_ns > 1000000) {
+            struct timespec sleep_ts;
+            sleep_ts.tv_sec = 0;
+            sleep_ts.tv_nsec = sleep_ns;
+            nanosleep(&sleep_ts, NULL);
+        }
+    }
+    
+
+    past = get_time_ns();
+    return;
+}
+
+void handle_tick_immediate() {
+    return;
+}
+
+void handle_tick() {
+    interrupt_count++;
+
+    switch (loc_ctx.run_mode) {
+        case PREDETERMINED:
+            handle_tick_predetermined();
+            break;
+        case YIELDING:
+            handle_tick_yielding();
+            break;
+        case LATENCY_ORIENTED:
+            handle_tick_latency_oriented();
+            break;
+        case IMMEDIATE:
+            handle_tick_immediate();
+            break;
+        default:
+            break;
+    }
 
     // 重要：重置计数器，否则只会触发一次
     ioctl(perf_fd, PERF_EVENT_IOC_RESET, 0);
+}
+
+void instruction_interrupt_handler(int signo, siginfo_t *info, void *context) {
+    if (atomic_load_explicit(&loc_ctx.in_critical, memory_order_relaxed)) {
+        // handle the tick later
+        atomic_fetch_add(&loc_ctx.n_signal_pendings, 1);
+        return;
+    }
+
+    handle_tick();
 }
 
 // 处理用户态设置 CPI 目标值的信号处理器
@@ -137,6 +251,9 @@ int setup_perf_ctrl() {
         close(perf_fd);
         perf_fd = 0;
     }
+
+    // reset local context
+    robflex_init_local_context();
 
     struct perf_event_attr attr;
     struct sigaction sa;
@@ -186,9 +303,7 @@ int setup_perf_ctrl() {
         return 1;
     }
 
-    // 3. 【关键步骤】指定使用该实时信号
-    // 默认情况下，即使注册了其他信号，perf_fd 仍可能发送 SIGIO。
-    // 必须显式告诉内核发送 PERF_SIGNAL。
+    // 指定使用该实时信号
     if (fcntl(perf_fd, F_SETSIG, PERF_SIGNAL) < 0) {
         perror("fcntl F_SETSIG");
         close(perf_fd);
