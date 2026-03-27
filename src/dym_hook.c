@@ -296,10 +296,19 @@ int setup_perf_ctrl() {
     }
     
     // 将perf_fd与信号关联
-    if (fcntl(perf_fd, F_SETFL, O_ASYNC) < 0 ||
-        fcntl(perf_fd, F_SETOWN, gettid()) < 0) {
-        perror("fcntl");
-        close(perf_fd);
+    pid_t tid = gettid();
+    // robflex_log_message(tid, "assign perf signal to %d", tid);
+    struct f_owner_ex owner;
+    owner.type = F_OWNER_TID; // 明确指出我要绑定的是一个具体的线程 (TID)
+    owner.pid = tid;
+
+    if (fcntl(perf_fd, F_SETFL, O_ASYNC) < 0) {
+        perror("fcntl O_ASYNC");
+        return 1;
+    }
+
+    if (fcntl(perf_fd, F_SETOWN_EX, &owner) < 0) {
+        perror("fcntl F_SETOWN_EX");
         return 1;
     }
 
