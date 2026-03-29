@@ -266,3 +266,24 @@ int robflex_switch_context(LocalContext *new_context, LocalContext *saved_contex
     }
     return 0;
 }
+
+// only for test
+int robflex_switch_context_block(LocalContext *new_context, LocalContext *saved_context){
+    LocalContext loc_ctx_backup;
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, PERF_SIGNAL);
+
+    sigprocmask(SIG_BLOCK, &set, NULL);
+    if(saved_context != NULL){
+        loc_ctx_backup = loc_ctx;
+    }
+    loc_ctx = *new_context;
+    sigprocmask(SIG_UNBLOCK, &set, NULL);
+
+    // probably saved_context is new_context, so we need to copy the data from loc_ctx_backup to saved_context
+    if(saved_context != NULL){
+        *saved_context = loc_ctx_backup;
+    }    
+    return 0;
+}

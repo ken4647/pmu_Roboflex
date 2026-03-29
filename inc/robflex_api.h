@@ -50,6 +50,8 @@ int robflex_set_as_immediate(uint64_t prio);    // will sched it as fifo
 int robflex_set_as_latency_flick(uint64_t lat_ns, uint64_t base_ns);  // set latency finish
 int robflex_add_runcycle(uint64_t runcycle);
 int robflex_shot_on_latency();                  // clear latency inner status, and restart time point
+int robflex_switch_context(LocalContext *new_context, LocalContext *saved_context);
+int robflex_switch_context_block(LocalContext *new_context, LocalContext *saved_context); // used for test
 
 // system context management
 enum SystemBusyDegree robflex_system_busy_degree();
