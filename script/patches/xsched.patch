@@ -288,6 +288,36 @@ index 609a38c..f9d8080 100644
      std::unordered_map<XQueueHandle, Priority> priorities_;
  };
  
+diff --git a/sched/include/xsched/sched/policy/hpf_shm.h b/sched/include/xsched/sched/policy/hpf_shm.h
+new file mode 100644
+index 0000000..39ba7c7
+--- /dev/null
++++ b/sched/include/xsched/sched/policy/hpf_shm.h
+@@ -0,0 +1,24 @@
++#pragma once
++
++#include "xsched/utils/hpf_shm.h"
++#include "xsched/sched/policy/hpf.h"
++
++namespace xsched::sched
++{
++
++/// @brief HPF policy that uses shared memory instead of IPC for suspend/resume.
++/// When used, SkipSchedOperations() returns true and ExecuteOperations is skipped.
++class HpfShmPolicy : public HighestPriorityFirstPolicy
++{
++public:
++    explicit HpfShmPolicy(utils::HpfShm *shm);
++    virtual ~HpfShmPolicy() = default;
++
++    virtual void Sched(const Status &status) override;
++    virtual bool SkipSchedOperations() const override { return true; }
++
++private:
++    utils::HpfShm *shm_ = nullptr;
++};
++
++} // namespace xsched::sched
 diff --git a/sched/include/xsched/sched/policy/policy.h b/sched/include/xsched/sched/policy/policy.h
 index 18efb7d..b016038 100644
 --- a/sched/include/xsched/sched/policy/policy.h
@@ -316,6 +346,52 @@ index 1e378f4..622bb68 100644
      virtual ~LocalScheduler();
  
      virtual void Run() override;
+diff --git a/sched/src/policy/hpf_shm.cpp b/sched/src/policy/hpf_shm.cpp
+new file mode 100644
+index 0000000..15b5eaf
+--- /dev/null
++++ b/sched/src/policy/hpf_shm.cpp
+@@ -0,0 +1,40 @@
++#include <map>
++
++#include "xsched/utils/xassert.h"
++#include "xsched/sched/policy/hpf_shm.h"
++
++using namespace xsched::sched;
++
++HpfShmPolicy::HpfShmPolicy(utils::HpfShm *shm)
++    : HighestPriorityFirstPolicy()
++    , shm_(shm)
++{
++    XASSERT(shm_ != nullptr && shm_->IsValid(), "HpfShmPolicy requires valid HpfShm");
++}
++
++void HpfShmPolicy::Sched(const Status &status)
++{
++    if (shm_ == nullptr || !shm_->IsValid()) return;
++
++    // Find the running highest priority task of each device (same as HPF)
++    std::map<XDevice, Priority> running_prio_max;
++    for (auto &s : status.xqueue_status) {
++        if (!s.second->ready) continue;
++        XQueueHandle handle = s.second->handle;
++        Priority priority = GetPriority(handle);
++
++        auto prio_it = running_prio_max.find(s.second->device);
++        if (prio_it == running_prio_max.end()) {
++            running_prio_max[s.second->device] = priority;
++        } else if (priority > prio_it->second) {
++            prio_it->second = priority;
++        }
++    }
++
++    // Write min_priority to shared memory for each device; clients will futex_wait on change
++    for (auto &kv : running_prio_max) {
++        // XINFO("HpfShmPolicy device 0x" FMT_64X " SetDeviceMinPriority min_priority=%d",
++        //       static_cast<uint64_t>(kv.first), static_cast<int>(kv.second));
++        shm_->SetDeviceMinPriority(kv.first, kv.second);
++    }
++}
 diff --git a/sched/src/scheduler/local.cpp b/sched/src/scheduler/local.cpp
 index 5dd6f37..8a5f24b 100644
 --- a/sched/src/scheduler/local.cpp
@@ -443,3 +519,285 @@ index 35314bc..9d0fda6 100644
  target_compile_options(utils PRIVATE
      -fPIC
      -Wall
+diff --git a/utils/include/xsched/utils/hpf_shm.h b/utils/include/xsched/utils/hpf_shm.h
+new file mode 100644
+index 0000000..d0a92fa
+--- /dev/null
++++ b/utils/include/xsched/utils/hpf_shm.h
+@@ -0,0 +1,75 @@
++#pragma once
++
++#include <cstdint>
++#include <memory>
++
++#include "xsched/types.h"
++
++namespace xsched::utils
++{
++
++/// @brief HPF shared memory for lock-free suspend/resume notification.
++/// When GLB+HPF uses this, XServer writes per-device min_priority and clients
++/// read it + futex_wait instead of receiving IPC SchedOperation.
++class HpfShm
++{
++public:
++    static constexpr uint32_t kMagic = 0x58534850;  // "XSHP"
++    static constexpr uint32_t kVersion = 1;
++    static constexpr size_t kMaxDevices = 32;
++
++    struct DeviceSlot
++    {
++        uint64_t device_id;       // XDevice
++        int32_t min_priority;     // atomic: min priority allowed to run
++        int32_t futex_seq;        // atomic: incremented on update for futex_wait
++    } __attribute__((aligned(8)));
++
++    struct ShmLayout
++    {
++        uint32_t magic;
++        uint32_t version;
++        uint32_t num_devices;
++        uint32_t _padding;
++        DeviceSlot slots[kMaxDevices];
++    };
++
++    /// @brief Create (server) or attach (client) to HPF shared memory.
++    /// @param name   shm name, e.g. "/xsched-hpf"
++    /// @param create if true, create and own; if false, attach read-only
++    /// @return valid pointer on success, nullptr on failure
++    static std::unique_ptr<HpfShm> Open(const char *name, bool create);
++
++    /// @brief Remove shared memory object (call on server shutdown).
++    static void Unlink(const char *name);
++
++    ~HpfShm();
++
++    HpfShm(const HpfShm &) = delete;
++    HpfShm &operator=(const HpfShm &) = delete;
++
++    /// @brief Get or add device slot. Returns slot index or -1 on failure.
++    int GetOrAddDevice(XDevice device);
++
++    /// @brief Server: set min_priority for device, wake waiters.
++    void SetDeviceMinPriority(XDevice device, Priority min_prio);
++
++    /// @brief Client: check if priority can run, else futex_wait until change.
++    /// @param device   XDevice for this XQueue
++    /// @param priority this XQueue's priority
++    void WaitUntilCanRun(XDevice device, Priority priority);
++
++    bool IsValid() const { return base_ != nullptr; }
++
++private:
++    HpfShm(void *base, int fd, bool owner);
++
++    DeviceSlot *FindSlot(XDevice device);
++    DeviceSlot *AddDevice(XDevice device);
++
++    void *base_ = nullptr;
++    int fd_ = -1;
++    bool owner_ = false;
++};
++
++} // namespace xsched::utils
+diff --git a/utils/src/hpf_shm.cpp b/utils/src/hpf_shm.cpp
+new file mode 100644
+index 0000000..17326ec
+--- /dev/null
++++ b/utils/src/hpf_shm.cpp
+@@ -0,0 +1,195 @@
++#include "xsched/utils/hpf_shm.h"
++#include "xsched/utils/log.h"
++#include "xsched/utils/xassert.h"
++
++#if defined(__linux__)
++
++#include <atomic>
++#include <cerrno>
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <linux/futex.h>
++#include <sys/syscall.h>
++
++#include <cstring>
++
++namespace xsched::utils
++{
++
++static int FutexWait(std::atomic<int32_t> *addr, int32_t expected)
++{
++    return syscall(SYS_futex, addr, FUTEX_WAIT, expected, nullptr, nullptr, 0);
++}
++
++static int FutexWake(std::atomic<int32_t> *addr, int n)
++{
++    return syscall(SYS_futex, addr, FUTEX_WAKE, n, nullptr, nullptr, 0);
++}
++
++std::unique_ptr<HpfShm> HpfShm::Open(const char *name, bool create)
++{
++    int fd;
++    if (create) {
++        fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0666);
++        if (fd < 0) {
++            shm_unlink(name);
++            fd = shm_open(name, O_RDWR | O_CREAT, 0666);
++        }
++    } else {
++        fd = shm_open(name, O_RDWR, 0);
++    }
++    if (fd < 0) {
++        XDEBG("HpfShm shm_open %s failed: %s", name, strerror(errno));
++        return nullptr;
++    }
++
++    size_t size = sizeof(ShmLayout);
++    if (create) {
++        if (ftruncate(fd, size) != 0) {
++            XERRO("HpfShm ftruncate failed");
++            close(fd);
++            if (create) shm_unlink(name);
++            return nullptr;
++        }
++    }
++
++    void *base = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++    if (base == MAP_FAILED) {
++        XERRO("HpfShm mmap failed");
++        close(fd);
++        if (create) shm_unlink(name);
++        return nullptr;
++    }
++
++    auto shm = std::unique_ptr<HpfShm>(new HpfShm(base, fd, create));
++    if (create) {
++        auto *layout = static_cast<ShmLayout *>(base);
++        layout->magic = kMagic;
++        layout->version = kVersion;
++        layout->num_devices = 0;
++        memset(layout->slots, 0, sizeof(layout->slots));
++        for (size_t i = 0; i < kMaxDevices; ++i) {
++            layout->slots[i].min_priority = PRIORITY_MIN - 1;  // none can run until first Sched
++        }
++    } else {
++        auto *layout = static_cast<ShmLayout *>(base);
++        if (layout->magic != kMagic || layout->version != kVersion) {
++            XWARN("HpfShm invalid magic/version");
++            return nullptr;
++        }
++    }
++
++    return shm;
++}
++
++void HpfShm::Unlink(const char *name)
++{
++#if defined(__linux__)
++    shm_unlink(name);
++#endif
++}
++
++HpfShm::HpfShm(void *base, int fd, bool owner)
++    : base_(base), fd_(fd), owner_(owner)
++{
++}
++
++HpfShm::~HpfShm()
++{
++    if (base_) {
++        munmap(base_, sizeof(ShmLayout));
++        base_ = nullptr;
++    }
++    if (fd_ >= 0) {
++        close(fd_);
++        fd_ = -1;
++    }
++}
++
++HpfShm::DeviceSlot *HpfShm::FindSlot(XDevice device)
++{
++    auto *layout = static_cast<ShmLayout *>(base_);
++    for (uint32_t i = 0; i < layout->num_devices && i < kMaxDevices; ++i) {
++        if (layout->slots[i].device_id == device)
++            return &layout->slots[i];
++    }
++    return nullptr;
++}
++
++HpfShm::DeviceSlot *HpfShm::AddDevice(XDevice device)
++{
++    auto *layout = static_cast<ShmLayout *>(base_);
++    if (layout->num_devices >= kMaxDevices) {
++        XWARN("HpfShm device limit reached");
++        return nullptr;
++    }
++    uint32_t idx = layout->num_devices++;
++    layout->slots[idx].device_id = device;
++    layout->slots[idx].min_priority = PRIORITY_MIN - 1;
++    layout->slots[idx].futex_seq = 0;
++    return &layout->slots[idx];
++}
++
++int HpfShm::GetOrAddDevice(XDevice device)
++{
++    auto *slot = FindSlot(device);
++    if (slot) {
++        return static_cast<int>(slot - static_cast<ShmLayout *>(base_)->slots);
++    }
++    if (owner_) {
++        slot = AddDevice(device);
++        return slot ? static_cast<int>(slot - static_cast<ShmLayout *>(base_)->slots) : -1;
++    }
++    return -1;
++}
++
++void HpfShm::SetDeviceMinPriority(XDevice device, Priority min_prio)
++{
++    auto *slot = FindSlot(device);
++    if (!slot) slot = AddDevice(device);
++    if (!slot) return;
++
++    slot->min_priority = min_prio;
++    __atomic_add_fetch(&slot->futex_seq, 1, __ATOMIC_RELEASE);
++    FutexWake(reinterpret_cast<std::atomic<int32_t> *>(&slot->futex_seq), INT32_MAX);
++}
++
++void HpfShm::WaitUntilCanRun(XDevice device, Priority priority)
++{
++    auto *slot = FindSlot(device);
++    if (!slot) return;  // device not in shm yet, allow run
++
++    while (true) {
++        int32_t min_p = __atomic_load_n(&slot->min_priority, __ATOMIC_ACQUIRE);
++        if (priority >= min_p) return;
++
++        int32_t seq = __atomic_load_n(&slot->futex_seq, __ATOMIC_ACQUIRE);
++        FutexWait(reinterpret_cast<std::atomic<int32_t> *>(&slot->futex_seq), seq);
++    }
++}
++
++} // namespace xsched::utils
++
++#else  // !__linux__
++
++namespace xsched::utils
++{
++
++std::unique_ptr<HpfShm> HpfShm::Open(const char *, bool)
++{
++    return nullptr;
++}
++
++void HpfShm::Unlink(const char *) {}
++
++HpfShm::~HpfShm() = default;
++
++int HpfShm::GetOrAddDevice(XDevice) { return -1; }
++void HpfShm::SetDeviceMinPriority(XDevice, Priority) {}
++void HpfShm::WaitUntilCanRun(XDevice, Priority) {}
++
++} // namespace xsched::utils
++
++#endif
