@@ -248,3 +248,21 @@ int robflex_shot_on_latency(){
     loc_ctx.aux.lat.start_time = robflex_get_time_ns();
     return 0;
 }
+
+int robflex_switch_context(LocalContext *new_context, LocalContext *saved_context){
+    LocalContext loc_ctx_backup;
+    atomic_store(&loc_ctx.in_critical, 1);
+    if(saved_context != NULL){
+        loc_ctx_backup = loc_ctx;
+    }
+    loc_ctx = *new_context;
+    atomic_store(&loc_ctx.in_critical, 0);
+    while(atomic_exchange(&loc_ctx.n_signal_pendings, 0)){
+        handle_tick();
+    }
+    // probably saved_context is new_context, so we need to copy the data from loc_ctx_backup to saved_context
+    if(saved_context != NULL){
+        *saved_context = loc_ctx_backup;
+    }
+    return 0;
+}
