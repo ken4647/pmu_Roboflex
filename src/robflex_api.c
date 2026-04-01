@@ -152,9 +152,9 @@ static uint64_t robflex_get_time_ns() {
 }
 
 // assume signal handler is not running
-int robflex_init_local_context(){
+int robflex_init_local_context(enum RunMode mode){
     loc_ctx.avg_timecost_ns = DEFUALT_PERIOD_TIME_IN_NS;
-    loc_ctx.run_mode = PREDETERMINED;
+    loc_ctx.run_mode = mode;
     atomic_store_explicit(&loc_ctx.aux.norm.time_slice_ns, DEFUALT_PERIOD_TIME_IN_NS, memory_order_relaxed);
     loc_ctx.aux.norm.time_budgets = 0;
     atomic_store_explicit(&loc_ctx.in_critical, 0, memory_order_relaxed);

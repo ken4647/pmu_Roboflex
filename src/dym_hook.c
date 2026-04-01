@@ -103,21 +103,7 @@ void handle_tick_yielding() {
     time_budgets += (long long)target_time_ns - (long long)diff;
     // robflex_log_message(gettid(), "target_time_ns:%llu, diff:%llu, sub:%lld, time_budgets:%lld", target_time_ns, diff, (long long)target_time_ns - (long long)diff, time_budgets);
     if (time_budgets>0){
-        if (busy_degree == SYSTEM_HIGH) {
-            uint64_t sleep_ns = min(time_budgets, target_time_ns);
-
-            // 休眠补足剩余时间
-            struct timespec sleep_ts;
-            sleep_ts.tv_sec = 0;
-            sleep_ts.tv_nsec = sleep_ns;
-
-            time_budgets -= sleep_ns;
-            sleeped_time += sleep_ns;
-            
-            nanosleep(&sleep_ts, NULL);
-        } else if (busy_degree == SYSTEM_MODERATE) {
-            time_budgets = max(0, time_budgets+(long long)avg_timecost_ns-target_time_ns);
-
+        if (busy_degree == SYSTEM_HIGH || busy_degree == SYSTEM_MODERATE) {
             // 仅仅让出CPU
             sched_yield();
         } else { //idle
@@ -126,12 +112,18 @@ void handle_tick_yielding() {
             // 不休眠，继续执行直到底层调度策略让出CPU
         }        
     }
-    time_budgets = min((long long)target_time_ns*3, time_budgets);
+    
+    past = get_time_ns();
+    
+    uint64_t yield_time = past - now;
+    time_budgets -= (long long)yield_time;
+
+    time_budgets = min((long long)target_time_ns, time_budgets);
     time_budgets = max(-(long long)target_time_ns, time_budgets);
 
     avg_timecost_ns = avg_timecost_ns * 0.9 + diff * 0.1;  // 简单的指数移动平均
     yd->time_budgets = time_budgets;
-    past = get_time_ns();
+    
 }
 
 void handle_tick_latency_oriented() {
@@ -253,7 +245,7 @@ int setup_perf_ctrl() {
     }
 
     // reset local context
-    robflex_init_local_context();
+    robflex_init_local_context(get_runmode_env());
 
     struct perf_event_attr attr;
     struct sigaction sa;
@@ -341,7 +333,7 @@ void perf_ctrl_cleanup() {
 
 int set_high_nice() {
     robflex_set_scheduler(gettid(), SCHED_OTHER, -20);
-    // robflex_set_scheduler(gettid(), SCHED_RR, 10);
+    // robflex_set_scheduler(gettid(), SCHED_FIFO, 10);
 
     return 0;
 }

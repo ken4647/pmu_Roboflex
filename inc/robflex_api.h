@@ -32,6 +32,25 @@ inline bool is_robflex_enabled() {
     return (env != NULL && strcmp(env, "1") == 0);
 }
 
+inline enum RunMode get_runmode_env(){
+    const char *env = getenv(ROBFLEX_RUNMODE_ENV);
+    if (env != NULL) {
+        if (strcmp(env, "0") == 0 || strcmp(env, "YIELDING") == 0) {
+            return YIELDING;
+        }
+        if (strcmp(env, "1") == 0 || strcmp(env, "PREDETERMINED") == 0) {
+            return PREDETERMINED;
+        }
+        if (strcmp(env, "2") == 0 || strcmp(env, "IMMEDIATE") == 0) {
+            return IMMEDIATE;
+        }
+        if (strcmp(env, "3") == 0 || strcmp(env, "LATENCY_ORIENTED") == 0) {
+            return LATENCY_ORIENTED;
+        }
+    }
+    return YIELDING;
+}
+
 // handler for cycles tick signal from PMI
 void handle_tick();
 
@@ -43,7 +62,7 @@ int robflex_update_ctrl_time_cost(pid_t tid, int value_in_us);
 
 // local context management
 extern __thread LocalContext loc_ctx;
-int robflex_init_local_context();
+int robflex_init_local_context(enum RunMode mode);
 int robflex_set_cycles_for_tick(uint64_t cycles);
 int robflex_set_time_for_throttle(uint64_t time_ns);
 int robflex_set_as_immediate(uint64_t prio);    // will sched it as fifo
