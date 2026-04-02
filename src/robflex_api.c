@@ -165,6 +165,10 @@ int robflex_init_local_context(enum RunMode mode){
 int robflex_set_cycles_for_tick(uint64_t cycles){
     atomic_store(&loc_ctx.in_critical, 1);
     if(loc_ctx.run_mode != YIELDING && loc_ctx.run_mode != PREDETERMINED){
+        atomic_store(&loc_ctx.in_critical, 0);
+        while(atomic_exchange(&loc_ctx.n_signal_pendings, 0)){
+            handle_tick();
+        }        
         return -1;
     }
     // TODO: reset cycles_num for perf_fd
@@ -177,9 +181,23 @@ int robflex_set_cycles_for_tick(uint64_t cycles){
     return 0;
 }
 
+int robflex_clear_time_budget(){
+    atomic_store(&loc_ctx.in_critical, 1);
+    loc_ctx.aux.norm.time_budgets = 0;
+    atomic_store(&loc_ctx.in_critical, 0);
+    while(atomic_exchange(&loc_ctx.n_signal_pendings, 0)){
+        handle_tick();
+    }
+    return 0;
+}
+
 int robflex_set_time_for_throttle(uint64_t time_ns){
     atomic_store(&loc_ctx.in_critical, 1);
     if(loc_ctx.run_mode != YIELDING && loc_ctx.run_mode != PREDETERMINED){
+        atomic_store(&loc_ctx.in_critical, 0);
+        while(atomic_exchange(&loc_ctx.n_signal_pendings, 0)){
+            handle_tick();
+        }
         return -1;
     }
     loc_ctx.aux.norm.time_slice_ns = time_ns;
@@ -222,6 +240,10 @@ int robflex_add_runcycle(uint64_t runcycle){
 int robflex_shot_on_latency(){
     atomic_store(&loc_ctx.in_critical, 1);
     if(loc_ctx.run_mode != LATENCY_ORIENTED){
+        atomic_store(&loc_ctx.in_critical, 0);
+        while(atomic_exchange(&loc_ctx.n_signal_pendings, 0)){
+            handle_tick();
+        }
         return -1;
     }
     uint64_t current_time = robflex_get_time_ns();

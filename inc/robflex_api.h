@@ -64,6 +64,7 @@ int robflex_update_ctrl_time_cost(pid_t tid, int value_in_us);
 extern __thread LocalContext loc_ctx;
 int robflex_init_local_context(enum RunMode mode);
 int robflex_set_cycles_for_tick(uint64_t cycles);
+int robflex_clear_time_budget();
 int robflex_set_time_for_throttle(uint64_t time_ns);
 int robflex_set_as_immediate(uint64_t prio);    // will sched it as fifo
 int robflex_set_as_latency_flick(uint64_t lat_ns, uint64_t base_ns);  // set latency finish
