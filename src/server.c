@@ -22,6 +22,10 @@
 #include <sys/capability.h>
 #include <sys/resource.h>
 #include <sched.h>
+#include <pthread.h>
+#include <time.h>
+#include <stdint.h>
+#include <sys/mman.h>
 
 #include <cJSON.h>
 
@@ -31,6 +35,135 @@ struct UnixSocketServer {
     int socket_fd;
     struct sockaddr_un addr;
 };
+
+typedef struct {
+    unsigned long long user, nice, system, idle, iowait, irq, softirq, steal;
+    unsigned long long total;
+    unsigned long long non_idle;
+} CPUData;
+
+#define CPU_STAT_INTERVAL_US 10000
+
+static SystemData *ptr_shmem = NULL;
+
+static enum SystemBusyDegree get_system_busy_degree(float load_1s) {
+    if (load_1s < 30.0f) {
+        return SYSTEM_IDLE;
+    } else if (load_1s < 80.0f) {
+        return SYSTEM_MODERATE;
+    } else {
+        return SYSTEM_HIGH;
+    }
+}
+
+static uint64_t get_time_ns() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static void read_cpu_data(FILE *fp, CPUData *cpus, int *count, int ncpu) {
+    char buffer[1024];
+    int i = 0;
+    rewind(fp);
+
+    while (fgets(buffer, sizeof(buffer), fp) && i < ncpu + 1) {
+        if (strncmp(buffer, "cpu", 3) != 0) {
+            break;
+        }
+
+        CPUData *c = &cpus[i];
+        char name[16];
+        if (sscanf(buffer, "%15s %llu %llu %llu %llu %llu %llu %llu %llu",
+                   name, &c->user, &c->nice, &c->system, &c->idle,
+                   &c->iowait, &c->irq, &c->softirq, &c->steal) < 8) {
+            break;
+        }
+        c->non_idle = c->user + c->nice + c->system + c->irq + c->softirq + c->steal;
+        c->total = c->non_idle + c->idle + c->iowait;
+        i++;
+    }
+
+    *count = i;
+}
+
+static float read_system_load(const CPUData *cur, const CPUData *prev) {
+    unsigned long long total_diff = cur[0].total - prev[0].total;
+    unsigned long long idle_diff = (cur[0].idle + cur[0].iowait) - (prev[0].idle + prev[0].iowait);
+
+    if (total_diff == 0) {
+        return 0.0f;
+    }
+
+    return (float)(total_diff - idle_diff) / (float)total_diff * 100.0f;
+}
+
+static SystemData *get_shmem_data(const char *shmem_name) {
+    if (ptr_shmem != NULL) {
+        return ptr_shmem;
+    }
+
+    int fd = shm_open(shmem_name, O_RDWR | O_CREAT, 0666);
+    if (fd == -1) {
+        perror("shm_open");
+        return NULL;
+    }
+
+    if (ftruncate(fd, sizeof(SystemData)) == -1) {
+        perror("ftruncate");
+        close(fd);
+        return NULL;
+    }
+
+    ptr_shmem = (SystemData *)mmap(NULL, sizeof(SystemData), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (ptr_shmem == MAP_FAILED) {
+        perror("mmap");
+        ptr_shmem = NULL;
+    }
+    close(fd);
+    return ptr_shmem;
+}
+
+static void *cpu_monitor_thread(void *arg) {
+    (void)arg;
+    FILE *fp = fopen("/proc/stat", "r");
+    if (!fp) {
+        perror("fopen /proc/stat");
+        return NULL;
+    }
+
+    int online_ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    if (online_ncpu <= 0) {
+        fprintf(stderr, "invalid online cpu count\n");
+        fclose(fp);
+        return NULL;
+    }
+
+    CPUData prev[online_ncpu + 1];
+    CPUData curr[online_ncpu + 1];
+    int cpu_count = 0;
+    float load_1s = 30.0f;
+
+    read_cpu_data(fp, prev, &cpu_count, online_ncpu);
+    while (1) {
+        usleep(CPU_STAT_INTERVAL_US);
+        uint64_t current_time = get_time_ns();
+        read_cpu_data(fp, curr, &cpu_count, online_ncpu);
+
+        float load_10ms = read_system_load(curr, prev);
+        load_1s = load_1s * 0.9f + load_10ms * 0.1f;
+
+        atomic_store(&ptr_shmem->load_10ms, load_10ms);
+        atomic_store(&ptr_shmem->load_1s, load_1s);
+        atomic_store(&ptr_shmem->last_update_time, current_time);
+        atomic_store(&ptr_shmem->busy_degree, get_system_busy_degree(load_1s));
+
+        prev[0] = curr[0];
+    }
+
+    fclose(fp);
+    return NULL;
+}
 
 int check_capability(cap_value_t cap) {
     cap_t caps = cap_get_proc();
@@ -202,6 +335,7 @@ void handle_client_request(struct UnixSocketServer *server) {
 
 int main() {
     struct UnixSocketServer server;
+    pthread_t monitor_tid;
     
     printf("Schedule Daemon is Starting...\n");
 
@@ -217,6 +351,21 @@ int main() {
     // 设置Unix Socket服务器
     if (setup_unix_socket(&server) != 0) {
         fprintf(stderr, "Failed to set up Unix Socket Server\n");
+        return 1;
+    }
+
+    if (get_shmem_data(SHMEM_NAME) == NULL) {
+        fprintf(stderr, "Failed to init shared memory for system load\n");
+        return 1;
+    }
+
+    if (pthread_create(&monitor_tid, NULL, cpu_monitor_thread, NULL) != 0) {
+        perror("pthread_create cpu_monitor_thread");
+        return 1;
+    }
+
+    if (pthread_detach(monitor_tid) != 0) {
+        perror("pthread_detach cpu_monitor_thread");
         return 1;
     }
 

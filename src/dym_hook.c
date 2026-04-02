@@ -78,17 +78,20 @@ void handle_tick_predetermined() {
         sleep_ts.tv_sec = 0;
         sleep_ts.tv_nsec = sleep_ns;
 
-        time_budgets -= sleep_ns;
         sleeped_time += sleep_ns;
         nanosleep(&sleep_ts, NULL);
     }
 
-    time_budgets = min((long long)target_time_ns*3, time_budgets);
-    time_budgets = max(-(long long)target_time_ns, time_budgets);
+    past = get_time_ns();
+    
+    uint64_t yield_time = past - now;
+    time_budgets -= (long long)yield_time;
+
+    time_budgets = min((long long)target_time_ns*5, time_budgets);
+    time_budgets = max(-(long long)target_time_ns*5, time_budgets);
 
     avg_timecost_ns = avg_timecost_ns * 0.9 + diff * 0.1;  // 简单的指数移动平均
     yd->time_budgets = time_budgets;
-    past = get_time_ns();
 }
 
 void handle_tick_yielding() {
@@ -118,8 +121,8 @@ void handle_tick_yielding() {
     uint64_t yield_time = past - now;
     time_budgets -= (long long)yield_time;
 
-    time_budgets = min((long long)target_time_ns, time_budgets);
-    time_budgets = max(-(long long)target_time_ns, time_budgets);
+    time_budgets = min((long long)target_time_ns*5, time_budgets);
+    time_budgets = max(-(long long)target_time_ns*5, time_budgets);
 
     avg_timecost_ns = avg_timecost_ns * 0.9 + diff * 0.1;  // 简单的指数移动平均
     yd->time_budgets = time_budgets;
