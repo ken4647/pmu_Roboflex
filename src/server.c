@@ -50,8 +50,8 @@ typedef struct {
 } CPUData;
 
 #define CPU_STAT_INTERVAL_US 10000
-#define IDLE_WAKE_INTERVAL_US 1000
-#define IDLE_WAKE_LOAD_THRESHOLD 95.0f
+#define IDLE_WAKE_WAIT_FOR_NS 1000000
+#define CPU_GAP_THRESHOLD 3000
 
 static SystemData *ptr_shmem = NULL;
 
@@ -68,6 +68,12 @@ static enum SystemBusyDegree get_system_busy_degree(float load_1s) {
 static uint64_t get_time_ns() {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+uint64_t get_thread_cpu_time_ns() {
+    struct timespec ts;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
@@ -184,8 +190,25 @@ static void *idle_waker_thread(void *arg) {
         perror("sched_setscheduler idle_waker_thread");
     }
 
+    uint64_t lasting_cpu_time = 0;
+    uint64_t last_cpu_time = get_thread_cpu_time_ns();
     while (1) {
-        futex_wake_one(&ptr_shmem->futex_wake_seq);
+        uint64_t now_cpu = get_thread_cpu_time_ns();
+        uint64_t delta = now_cpu - last_cpu_time;
+    
+        if (delta < CPU_GAP_THRESHOLD) {
+            lasting_cpu_time += delta;
+        } else {
+            lasting_cpu_time = 0;
+        }
+
+        last_cpu_time = now_cpu;
+
+        if (lasting_cpu_time >= IDLE_WAKE_WAIT_FOR_NS) {
+            futex_wake_one(&ptr_shmem->futex_wake_seq);
+            // printf("waked up one thread\n");
+            lasting_cpu_time = 0;
+        }
     }
     return NULL;
 }

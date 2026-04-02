@@ -80,9 +80,8 @@ void handle_tick_vsleep() {
 
     if (time_budgets > 0) {
         uint64_t sleep_ns = min(time_budgets, target_time_ns);
-        sleeped_time += sleep_ns;
         if (g_shmem_data != NULL) {
-            int ret = futex_wait_timeout(&g_shmem_data->futex_wake_seq, 1, sleep_ns); // will only be timeout or wake up
+            int ret = futex_wait_timeout(&g_shmem_data->futex_wake_seq, 0, sleep_ns); // will only be timeout or wake up
             if (ret == -1 && errno != EAGAIN && errno != EINTR && errno != ETIMEDOUT) {
                 // ignore unexpected wait errors, keep throttling loop robust
             }
@@ -91,6 +90,7 @@ void handle_tick_vsleep() {
 
     past = get_time_ns();
     uint64_t yield_time = past - now;
+    sleeped_time += yield_time;
     time_budgets -= (long long)yield_time;
     time_budgets = min((long long)target_time_ns * 5, time_budgets);
     time_budgets = max(-(long long)target_time_ns * 5, time_budgets);
@@ -117,13 +117,14 @@ void handle_tick_predetermined() {
         sleep_ts.tv_sec = 0;
         sleep_ts.tv_nsec = sleep_ns;
 
-        sleeped_time += sleep_ns;
         nanosleep(&sleep_ts, NULL);
     }
 
     past = get_time_ns();
     
     uint64_t yield_time = past - now;
+    sleeped_time += yield_time;
+
     time_budgets -= (long long)yield_time;
 
     time_budgets = min((long long)target_time_ns*5, time_budgets);
