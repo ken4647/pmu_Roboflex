@@ -41,7 +41,8 @@ typedef struct SystemData{
     _Atomic float load_10ms;
     _Atomic float load_1s;
     _Atomic uint64_t last_update_time;
-    _Atomic enum SystemBusyDegree busy_degree; 
+    _Atomic enum SystemBusyDegree busy_degree;
+    _Atomic int futex_wake_seq;
 }__attribute__((aligned(8))) SystemData;
 
 enum RunMode {

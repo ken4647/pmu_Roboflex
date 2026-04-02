@@ -16,13 +16,16 @@
 #include <dlfcn.h>
 #include <stdarg.h>
 #include <linux/sched.h>
+#include <linux/futex.h>
 #include <pthread.h>
 #include <robflex_def.h>
 #include <robflex_api.h>
 #include <stdatomic.h>
+#include <errno.h>
 
 
 void* _init_shmem_data(const char *shmem_name);
+__thread SystemData *g_shmem_data = NULL;
 
 __thread int perf_fd = 0;
 // 统计信息
@@ -59,6 +62,42 @@ uint64_t get_time_ns() {
 }
 
 __thread uint64_t past, now, diff;
+static int futex_wait_timeout(_Atomic int *uaddr, int expected, uint64_t timeout_ns) {
+    struct timespec ts;
+    ts.tv_sec = timeout_ns / 1000000000ULL;
+    ts.tv_nsec = timeout_ns % 1000000000ULL;
+    return syscall(SYS_futex, (int *)uaddr, FUTEX_WAIT, expected, &ts, NULL, 0);
+}
+
+void handle_tick_vsleep() {
+    const uint64_t target_time_ns = get_perf_ctrl_cpi_atomic();
+    struct YieldDemand *yd = &loc_ctx.aux.norm;
+    long long time_budgets = yd->time_budgets;
+
+    now = get_time_ns();
+    diff = now - past;
+    time_budgets += (long long)target_time_ns - (long long)diff;
+
+    if (time_budgets > 0) {
+        uint64_t sleep_ns = min(time_budgets, target_time_ns);
+        sleeped_time += sleep_ns;
+        if (g_shmem_data != NULL) {
+            int ret = futex_wait_timeout(&g_shmem_data->futex_wake_seq, 1, sleep_ns); // will only be timeout or wake up
+            if (ret == -1 && errno != EAGAIN && errno != EINTR && errno != ETIMEDOUT) {
+                // ignore unexpected wait errors, keep throttling loop robust
+            }
+        }
+    }
+
+    past = get_time_ns();
+    uint64_t yield_time = past - now;
+    time_budgets -= (long long)yield_time;
+    time_budgets = min((long long)target_time_ns * 5, time_budgets);
+    time_budgets = max(-(long long)target_time_ns * 5, time_budgets);
+    avg_timecost_ns = avg_timecost_ns * 0.9 + diff * 0.1;
+    yd->time_budgets = time_budgets;
+}
+
 void handle_tick_predetermined() {
     const uint64_t target_time_ns = get_perf_ctrl_cpi_atomic();  // 1ms = 1,000,000 纳秒
     enum SystemBusyDegree busy_degree = robflex_system_busy_degree();
@@ -183,7 +222,7 @@ void handle_tick() {
 
     switch (loc_ctx.run_mode) {
         case PREDETERMINED:
-            handle_tick_predetermined();
+            handle_tick_vsleep();
             break;
         case YIELDING:
             handle_tick_yielding();
@@ -343,7 +382,7 @@ int set_high_nice() {
 
 int setup_robflex_if_enabled() {
     if (is_robflex_enabled()) {
-        _init_shmem_data(SHMEM_NAME);
+        g_shmem_data = _init_shmem_data(SHMEM_NAME);
         set_high_nice();
         setup_perf_ctrl();
         setup_param_recver();

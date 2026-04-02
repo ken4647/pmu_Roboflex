@@ -26,10 +26,17 @@
 #include <time.h>
 #include <stdint.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
+#include <linux/futex.h>
+#include <limits.h>
 
 #include <cJSON.h>
 
 #include <robflex_def.h>
+
+#ifndef SCHED_IDLE
+#define SCHED_IDLE 5
+#endif
 
 struct UnixSocketServer {
     int socket_fd;
@@ -43,6 +50,8 @@ typedef struct {
 } CPUData;
 
 #define CPU_STAT_INTERVAL_US 10000
+#define IDLE_WAKE_INTERVAL_US 1000
+#define IDLE_WAKE_LOAD_THRESHOLD 95.0f
 
 static SystemData *ptr_shmem = NULL;
 
@@ -162,6 +171,22 @@ static void *cpu_monitor_thread(void *arg) {
     }
 
     fclose(fp);
+    return NULL;
+}
+
+static int futex_wake_one(_Atomic int *uaddr) {
+    return syscall(SYS_futex, (int *)uaddr, FUTEX_WAKE, 1, NULL, NULL, 0);
+}
+
+static void *idle_waker_thread(void *arg) {
+    (void)arg;
+    if (sched_setscheduler(0, SCHED_IDLE, &(struct sched_param){.sched_priority = 0}) != 0) {
+        perror("sched_setscheduler idle_waker_thread");
+    }
+
+    while (1) {
+        futex_wake_one(&ptr_shmem->futex_wake_seq);
+    }
     return NULL;
 }
 
@@ -336,6 +361,7 @@ void handle_client_request(struct UnixSocketServer *server) {
 int main() {
     struct UnixSocketServer server;
     pthread_t monitor_tid;
+    pthread_t idle_waker_tid;
     
     printf("Schedule Daemon is Starting...\n");
 
@@ -358,6 +384,7 @@ int main() {
         fprintf(stderr, "Failed to init shared memory for system load\n");
         return 1;
     }
+    atomic_store(&ptr_shmem->futex_wake_seq, 0);
 
     if (pthread_create(&monitor_tid, NULL, cpu_monitor_thread, NULL) != 0) {
         perror("pthread_create cpu_monitor_thread");
@@ -366,6 +393,16 @@ int main() {
 
     if (pthread_detach(monitor_tid) != 0) {
         perror("pthread_detach cpu_monitor_thread");
+        return 1;
+    }
+
+    if (pthread_create(&idle_waker_tid, NULL, idle_waker_thread, NULL) != 0) {
+        perror("pthread_create idle_waker_thread");
+        return 1;
+    }
+
+    if (pthread_detach(idle_waker_tid) != 0) {
+        perror("pthread_detach idle_waker_thread");
         return 1;
     }
 
