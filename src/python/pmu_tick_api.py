@@ -28,7 +28,7 @@ ffi.cdef(
         PREDETERMINED = 1,
         IMMEDIATE = 2,
         LATENCY_ORIENTED = 3
-    } RunMode;
+    } RunPolicy;
 
     struct YieldDemand {
         atomic_ullong time_slice_ns;
@@ -50,7 +50,7 @@ ffi.cdef(
     typedef struct {
         atomic_int in_critical;
         atomic_int n_signal_pendings;
-        RunMode run_mode;
+        RunPolicy policy;
         union uAuxData aux;
         uint64_t cycles_num;
         uint64_t avg_timecost_ns;
@@ -61,7 +61,7 @@ ffi.cdef(
     int robflex_log_message(pid_t tid, const char *message, ...);
     int robflex_update_ctrl_time_cost(pid_t tid, int value_in_us);
 
-    int robflex_init_local_context(RunMode mode);
+    int robflex_init_local_context(RunPolicy mode);
     int robflex_set_cycles_for_tick(uint64_t cycles);
     int robflex_clear_time_budget(void);
     int robflex_set_time_for_throttle(uint64_t time_ns);
@@ -110,7 +110,7 @@ SCHED_ISO = 4
 SCHED_IDLE = 5
 SCHED_DEADLINE = 6
 
-class RunMode:
+class RunPolicy:
     YIELDING = 0
     PREDETERMINED = 1
     IMMEDIATE = 2

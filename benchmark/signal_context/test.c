@@ -10,7 +10,7 @@ typedef int (*robflex_switch_fn)(LocalContext *, LocalContext *);
 
 static void fill_predetermined_ctx(LocalContext *c) {
     memset(c, 0, sizeof(*c));
-    c->run_mode = PREDETERMINED;
+    c->policy = PREDETERMINED;
     c->avg_timecost_ns = DEFUALT_PERIOD_TIME_IN_NS;
     atomic_store_explicit(&c->aux.norm.time_slice_ns, DEFUALT_PERIOD_TIME_IN_NS,
                           memory_order_relaxed);

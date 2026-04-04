@@ -45,7 +45,7 @@ typedef struct SystemData{
     _Atomic int futex_wake_seq;
 }__attribute__((aligned(8))) SystemData;
 
-enum RunMode {
+enum RunPolicy {
     YIELDING = 0,   // sleep/yield when tick occurs (depend on System Status)
     PREDETERMINED,  // run as expected, whatever system is busy or idle
     IMMEDIATE,      // run as fast as possible, won't stop for signal handle
@@ -73,7 +73,7 @@ union uAuxData {
 typedef struct LocalContext{
     atomic_int in_critical; 
     atomic_int n_signal_pendings;
-    enum RunMode run_mode;
+    enum RunPolicy policy;
     union uAuxData aux;
     uint64_t cycles_num;
     // 统计数据

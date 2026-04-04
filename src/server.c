@@ -50,7 +50,7 @@ typedef struct {
 } CPUData;
 
 #define CPU_STAT_INTERVAL_US 10000
-#define IDLE_WAKE_WAIT_FOR_NS 1000000
+#define IDLE_WAKE_WAIT_FOR_NS 5000
 #define CPU_GAP_THRESHOLD 3000
 
 static SystemData *ptr_shmem = NULL;
@@ -193,6 +193,10 @@ static void *idle_waker_thread(void *arg) {
     uint64_t lasting_cpu_time = 0;
     uint64_t last_cpu_time = get_thread_cpu_time_ns();
     while (1) {
+        // yield cpu to other threads, if no other threads are running,
+        //  this thread will run forward and get lasting_cpu_time updated.
+        sched_yield();
+
         uint64_t now_cpu = get_thread_cpu_time_ns();
         uint64_t delta = now_cpu - last_cpu_time;
     

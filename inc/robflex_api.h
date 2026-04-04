@@ -32,7 +32,7 @@ inline bool is_robflex_enabled() {
     return (env != NULL && strcmp(env, "1") == 0);
 }
 
-inline enum RunMode get_runmode_env(){
+inline enum RunPolicy get_runmode_env(){
     const char *env = getenv(ROBFLEX_RUNMODE_ENV);
     if (env != NULL) {
         if (strcmp(env, "0") == 0 || strcmp(env, "YIELDING") == 0) {
@@ -60,9 +60,17 @@ int robflex_set_priority(pid_t tid, int priority);
 int robflex_log_message(pid_t tid, const char *message, ...);
 int robflex_update_ctrl_time_cost(pid_t tid, int value_in_us);
 
+// event management(For global/local context)
+int create_event();
+int declare_event();
+int release_event();
+int attach_context_for_event();
+int deatach_context_for_event();
+int get_policy_for_event();
+
 // local context management
 extern __thread LocalContext loc_ctx;
-int robflex_init_local_context(enum RunMode mode);
+int robflex_init_local_context(enum RunPolicy mode);
 int robflex_set_cycles_for_tick(uint64_t cycles);
 int robflex_clear_time_budget();
 int robflex_set_time_for_throttle(uint64_t time_ns);

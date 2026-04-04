@@ -221,7 +221,7 @@ void handle_tick_immediate() {
 void handle_tick() {
     interrupt_count++;
 
-    switch (loc_ctx.run_mode) {
+    switch (loc_ctx.policy) {
         case PREDETERMINED:
             handle_tick_vsleep();
             break;

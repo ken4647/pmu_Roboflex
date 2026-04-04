@@ -152,9 +152,9 @@ static uint64_t robflex_get_time_ns() {
 }
 
 // assume signal handler is not running
-int robflex_init_local_context(enum RunMode mode){
+int robflex_init_local_context(enum RunPolicy mode){
     loc_ctx.avg_timecost_ns = DEFUALT_PERIOD_TIME_IN_NS;
-    loc_ctx.run_mode = mode;
+    loc_ctx.policy = mode;
     atomic_store_explicit(&loc_ctx.aux.norm.time_slice_ns, DEFUALT_PERIOD_TIME_IN_NS, memory_order_relaxed);
     loc_ctx.aux.norm.time_budgets = 0;
     atomic_store_explicit(&loc_ctx.in_critical, 0, memory_order_relaxed);
@@ -164,7 +164,7 @@ int robflex_init_local_context(enum RunMode mode){
 
 int robflex_set_cycles_for_tick(uint64_t cycles){
     atomic_store(&loc_ctx.in_critical, 1);
-    if(loc_ctx.run_mode != YIELDING && loc_ctx.run_mode != PREDETERMINED){
+    if(loc_ctx.policy != YIELDING && loc_ctx.policy != PREDETERMINED){
         atomic_store(&loc_ctx.in_critical, 0);
         while(atomic_exchange(&loc_ctx.n_signal_pendings, 0)){
             handle_tick();
@@ -193,7 +193,7 @@ int robflex_clear_time_budget(){
 
 int robflex_set_time_for_throttle(uint64_t time_ns){
     atomic_store(&loc_ctx.in_critical, 1);
-    if(loc_ctx.run_mode != YIELDING && loc_ctx.run_mode != PREDETERMINED){
+    if(loc_ctx.policy != YIELDING && loc_ctx.policy != PREDETERMINED){
         atomic_store(&loc_ctx.in_critical, 0);
         while(atomic_exchange(&loc_ctx.n_signal_pendings, 0)){
             handle_tick();
@@ -210,13 +210,13 @@ int robflex_set_time_for_throttle(uint64_t time_ns){
 }
 
 int robflex_set_as_immediate(uint64_t prio){
-    loc_ctx.run_mode = IMMEDIATE;
+    loc_ctx.policy = IMMEDIATE;
     return 0;
 }
 
 int robflex_set_as_latency_flick(uint64_t lat_ns, uint64_t base_ns){
     atomic_store(&loc_ctx.in_critical, 1);
-    loc_ctx.run_mode = LATENCY_ORIENTED;
+    loc_ctx.policy = LATENCY_ORIENTED;
     loc_ctx.aux.lat.target_lat = lat_ns;
     loc_ctx.aux.lat.start_time = robflex_get_time_ns();
     loc_ctx.aux.lat.hist_ncycle = base_ns;
@@ -239,7 +239,7 @@ int robflex_add_runcycle(uint64_t runcycle){
 
 int robflex_shot_on_latency(){
     atomic_store(&loc_ctx.in_critical, 1);
-    if(loc_ctx.run_mode != LATENCY_ORIENTED){
+    if(loc_ctx.policy != LATENCY_ORIENTED){
         atomic_store(&loc_ctx.in_critical, 0);
         while(atomic_exchange(&loc_ctx.n_signal_pendings, 0)){
             handle_tick();
