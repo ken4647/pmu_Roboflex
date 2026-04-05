@@ -50,12 +50,12 @@ int robflex_set_scheduler(pid_t tid, int policy, int priority) {
     cJSON_AddNumberToObject(root, "policy", policy);
     cJSON_AddNumberToObject(root, "priority", priority);
 
-    char *cmd_str = cJSON_PrintUnformatted(root);
-    int result = send_command_to_daemon(cmd_str);
-
+    if (!cJSON_PrintPreallocated(root, cmd_json, (int)sizeof(cmd_json), 0)) {
+        cJSON_Delete(root);
+        return -1;
+    }
+    int result = send_command_to_daemon(cmd_json);
     cJSON_Delete(root);
-    free(cmd_str);
-
     return result;
 }
 
@@ -67,12 +67,12 @@ int robflex_set_priority(pid_t tid, int priority) {
     cJSON_AddNumberToObject(root, "tid", tid? tid : gettid());
     cJSON_AddNumberToObject(root, "priority", priority);
 
-    char *cmd_str = cJSON_PrintUnformatted(root);
-    int result = send_command_to_daemon(cmd_str);
-
+    if (!cJSON_PrintPreallocated(root, cmd_json, (int)sizeof(cmd_json), 0)) {
+        cJSON_Delete(root);
+        return -1;
+    }
+    int result = send_command_to_daemon(cmd_json);
     cJSON_Delete(root);
-    free(cmd_str);
-
     return result;
 }
 
@@ -95,12 +95,12 @@ int robflex_log_message(pid_t tid, const char *message, ...) {
     cJSON_AddNumberToObject(root, "tid", tid);
     cJSON_AddStringToObject(root, "message", formatted_message);
 
-    char *cmd_str = cJSON_PrintUnformatted(root);
-    result = send_command_to_daemon(cmd_str);
-
+    if (!cJSON_PrintPreallocated(root, cmd_json, (int)sizeof(cmd_json), 0)) {
+        cJSON_Delete(root);
+        return -1;
+    }
+    result = send_command_to_daemon(cmd_json);
     cJSON_Delete(root);
-    free(cmd_str);
-
     return result;
 }
 
@@ -113,12 +113,12 @@ int robflex_update_ctrl_time_cost(pid_t tid, int value_in_us) {
     cJSON_AddNumberToObject(root, "tid", tid? tid : gettid());
     cJSON_AddNumberToObject(root, "value_in_us", value_in_us);
 
-    char *cmd_str = cJSON_PrintUnformatted(root);
-    result = send_command_to_daemon(cmd_str);
-
+    if (!cJSON_PrintPreallocated(root, cmd_json, (int)sizeof(cmd_json), 0)) {
+        cJSON_Delete(root);
+        return -1;
+    }
+    result = send_command_to_daemon(cmd_json);
     cJSON_Delete(root);
-    free(cmd_str);
-
     return result;
 }
 
@@ -151,22 +151,137 @@ static uint64_t robflex_get_time_ns() {
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
+int robflex_create_event(const char* event_name){
+    return 0;
+}
+
+int robflex_delete_event(const char* event_name){
+    return 0;
+}
+
+/* Send to daemon to apply/cancel event */
+int robflex_apply_event(const char* event_name, uint64_t timeout, int strength){
+    char cmd_json[MAX_JSON_SIZE];
+    int result = -1;
+
+    cJSON *root = cJSON_CreateObject();    
+    cJSON_AddStringToObject(root, "cmd", "apply_event");
+    cJSON_AddStringToObject(root, "event_name", event_name);
+    cJSON_AddNumberToObject(root, "timeout", timeout);
+    cJSON_AddNumberToObject(root, "strength", strength);
+
+    if (!cJSON_PrintPreallocated(root, cmd_json, (int)sizeof(cmd_json), 0)) {
+        cJSON_Delete(root);
+        return -1;
+    }
+    result = send_command_to_daemon(cmd_json);
+    cJSON_Delete(root);
+    return result;
+}
+
+int robflex_cancel_event(const char* event_name, int strength){
+    char cmd_json[MAX_JSON_SIZE];
+    int result = -1;
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "cmd", "cancel_event");
+    cJSON_AddStringToObject(root, "event_name", event_name);
+    cJSON_AddNumberToObject(root, "strength", strength);
+
+    if (!cJSON_PrintPreallocated(root, cmd_json, (int)sizeof(cmd_json), 0)) {
+        cJSON_Delete(root);
+        return -1;
+    }
+    result = send_command_to_daemon(cmd_json);
+    cJSON_Delete(root);
+    return result;
+}
+
+int robflex_attach_context_for_event(const char *event_name, enum RunPolicy epolicy,
+                                     union uAuxData data, uint32_t level)
+{
+    if (event_name == NULL || event_map == NULL) {
+        return -1;
+    }
+    int event_idx = (int)robflex_get_event_idx(event_name);
+    if (event_idx == (int)ROBFLEX_EVENT_NONE) {
+        return -1;
+    }
+
+    int absent = 0;
+    khint_t key = kh_put(EventMap, event_map, event_idx, &absent);
+    if (absent < 0) {
+        return -1;
+    }
+
+    LocalContext ctx = {
+        .policy = epolicy,
+        .aux = data,
+        .level = (int)level,
+    };
+    kh_value(event_map, key) = ctx;
+    return 0;
+}
+
+int robflex_dettach_context_for_event(const char *event_name)
+{
+    if (event_name == NULL || event_map == NULL) {
+        return -1;
+    }
+    int event_idx = (int)robflex_get_event_idx(event_name);
+    if (event_idx == (int)ROBFLEX_EVENT_NONE) {
+        return -1;
+    }
+
+    khint_t k = kh_get(EventMap, event_map, event_idx);
+    if (k == kh_end(event_map)) {
+        return -1;
+    }
+    kh_del(EventMap, event_map, k);
+    return 0;
+}
+
+int robflex_get_policy_for_event(const char *event_name)
+{
+    if (event_name == NULL || event_map == NULL) {
+        return -1;
+    }
+    int event_idx = (int)robflex_get_event_idx(event_name);
+    if (event_idx == (int)ROBFLEX_EVENT_NONE) {
+        return -1;
+    }
+
+    khint_t k = kh_get(EventMap, event_map, event_idx);
+    if (k == kh_end(event_map)) {
+        return -1;
+    }
+    return (int)kh_value(event_map, k).policy;
+}
+
+bool robflex_test_event(int event_idx){
+    if(event_idx == -1){
+        return false;
+    }
+
+    return atomic_load(&ptr_shmem->event_bits[event_idx/64]) & (1ULL << (event_idx%64));
+}
+
 // assume signal handler is not running
 int robflex_init_local_context(enum RunPolicy mode){
     loc_ctx.avg_timecost_ns = DEFUALT_PERIOD_TIME_IN_NS;
     loc_ctx.policy = mode;
     atomic_store_explicit(&loc_ctx.aux.norm.time_slice_ns, DEFUALT_PERIOD_TIME_IN_NS, memory_order_relaxed);
     loc_ctx.aux.norm.time_budgets = 0;
-    atomic_store_explicit(&loc_ctx.in_critical, 0, memory_order_relaxed);
-    atomic_store_explicit(&loc_ctx.n_signal_pendings, 0, memory_order_relaxed);
+    atomic_store_explicit(&in_critical, 0, memory_order_relaxed);
+    atomic_store_explicit(&n_signal_pendings, 0, memory_order_relaxed);
     return 0;
 }
 
 int robflex_set_cycles_for_tick(uint64_t cycles){
-    atomic_store(&loc_ctx.in_critical, 1);
+    atomic_store(&in_critical, 1);
     if(loc_ctx.policy != YIELDING && loc_ctx.policy != PREDETERMINED){
-        atomic_store(&loc_ctx.in_critical, 0);
-        while(atomic_exchange(&loc_ctx.n_signal_pendings, 0)){
+        atomic_store(&in_critical, 0);
+        while(atomic_exchange(&n_signal_pendings, 0)){
             handle_tick();
         }        
         return -1;
@@ -174,36 +289,36 @@ int robflex_set_cycles_for_tick(uint64_t cycles){
     // TODO: reset cycles_num for perf_fd
     
     loc_ctx.aux.norm.time_budgets = 0;
-    atomic_store(&loc_ctx.in_critical, 0);
-    while(atomic_exchange(&loc_ctx.n_signal_pendings, 0)){
+    atomic_store(&in_critical, 0);
+    while(atomic_exchange(&n_signal_pendings, 0)){
         handle_tick();
     }
     return 0;
 }
 
 int robflex_clear_time_budget(){
-    atomic_store(&loc_ctx.in_critical, 1);
+    atomic_store(&in_critical, 1);
     loc_ctx.aux.norm.time_budgets = 0;
-    atomic_store(&loc_ctx.in_critical, 0);
-    while(atomic_exchange(&loc_ctx.n_signal_pendings, 0)){
+    atomic_store(&in_critical, 0);
+    while(atomic_exchange(&n_signal_pendings, 0)){
         handle_tick();
     }
     return 0;
 }
 
 int robflex_set_time_for_throttle(uint64_t time_ns){
-    atomic_store(&loc_ctx.in_critical, 1);
+    atomic_store(&in_critical, 1);
     if(loc_ctx.policy != YIELDING && loc_ctx.policy != PREDETERMINED){
-        atomic_store(&loc_ctx.in_critical, 0);
-        while(atomic_exchange(&loc_ctx.n_signal_pendings, 0)){
+        atomic_store(&in_critical, 0);
+        while(atomic_exchange(&n_signal_pendings, 0)){
             handle_tick();
         }
         return -1;
     }
     loc_ctx.aux.norm.time_slice_ns = time_ns;
     loc_ctx.aux.norm.time_budgets = 0;
-    atomic_store(&loc_ctx.in_critical, 0);
-    while(atomic_exchange(&loc_ctx.n_signal_pendings, 0)){
+    atomic_store(&in_critical, 0);
+    while(atomic_exchange(&n_signal_pendings, 0)){
         handle_tick();
     }
     return 0;
@@ -215,33 +330,33 @@ int robflex_set_as_immediate(uint64_t prio){
 }
 
 int robflex_set_as_latency_flick(uint64_t lat_ns, uint64_t base_ns){
-    atomic_store(&loc_ctx.in_critical, 1);
+    atomic_store(&in_critical, 1);
     loc_ctx.policy = LATENCY_ORIENTED;
     loc_ctx.aux.lat.target_lat = lat_ns;
     loc_ctx.aux.lat.start_time = robflex_get_time_ns();
     loc_ctx.aux.lat.hist_ncycle = base_ns;
-    atomic_store(&loc_ctx.in_critical, 0);
-    while(atomic_exchange(&loc_ctx.n_signal_pendings, 0)){
+    atomic_store(&in_critical, 0);
+    while(atomic_exchange(&n_signal_pendings, 0)){
         handle_tick();
     }
     return 0;
 }
 
 int robflex_add_runcycle(uint64_t runcycle){
-    atomic_store(&loc_ctx.in_critical, 1);
+    atomic_store(&in_critical, 1);
     loc_ctx.aux.lat.used_ncycle += runcycle;
-    atomic_store(&loc_ctx.in_critical, 0);
-    while(atomic_exchange(&loc_ctx.n_signal_pendings, 0)){
+    atomic_store(&in_critical, 0);
+    while(atomic_exchange(&n_signal_pendings, 0)){
         handle_tick();
     }
     return 0;
 }
 
 int robflex_shot_on_latency(){
-    atomic_store(&loc_ctx.in_critical, 1);
+    atomic_store(&in_critical, 1);
     if(loc_ctx.policy != LATENCY_ORIENTED){
-        atomic_store(&loc_ctx.in_critical, 0);
-        while(atomic_exchange(&loc_ctx.n_signal_pendings, 0)){
+        atomic_store(&in_critical, 0);
+        while(atomic_exchange(&n_signal_pendings, 0)){
             handle_tick();
         }
         return -1;
@@ -252,9 +367,9 @@ int robflex_shot_on_latency(){
     loc_ctx.aux.lat.hist_ncycle = loc_ctx.aux.lat.hist_ncycle*0.5 + loc_ctx.aux.lat.used_ncycle*0.5;
     // loc_ctx.aux.lat.start_time = current_time;
     loc_ctx.aux.lat.used_ncycle = 0;
-    atomic_store(&loc_ctx.in_critical, 0);
+    atomic_store(&in_critical, 0);
 
-    while(atomic_exchange(&loc_ctx.n_signal_pendings, 0)){
+    while(atomic_exchange(&n_signal_pendings, 0)){
         handle_tick();
     }
 
@@ -273,13 +388,13 @@ int robflex_shot_on_latency(){
 
 int robflex_switch_context(LocalContext *new_context, LocalContext *saved_context){
     LocalContext loc_ctx_backup;
-    atomic_store(&loc_ctx.in_critical, 1);
+    atomic_store(&in_critical, 1);
     if(saved_context != NULL){
         loc_ctx_backup = loc_ctx;
     }
     loc_ctx = *new_context;
-    atomic_store(&loc_ctx.in_critical, 0);
-    while(atomic_exchange(&loc_ctx.n_signal_pendings, 0)){
+    atomic_store(&in_critical, 0);
+    while(atomic_exchange(&n_signal_pendings, 0)){
         handle_tick();
     }
     // probably saved_context is new_context, so we need to copy the data from loc_ctx_backup to saved_context

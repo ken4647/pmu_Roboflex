@@ -1,0 +1,26 @@
+{
+  "name": "example_config",
+    "default": {
+        "policy": "yielding",
+        "period_time_ns": 1000000,
+        "period_cycles_quota": 1000000
+    },
+  "policy_table": {
+    "high_speed": {
+      "policy": "immediate",
+      "level": 1
+    },
+    "stationary": {
+      "policy": "predetermined",
+      "period_time_ns": 2000000,
+      "period_cycles_quota": 1000000,
+      "level": 3
+    },
+    "interaction": {
+      "policy": "yielding",
+      "period_time_ns": 1000000,
+      "period_cycles_quota": 1000000,
+      "level": 2
+    }
+  }
+}

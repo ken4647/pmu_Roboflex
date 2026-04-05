@@ -45,6 +45,7 @@ endif()
 add_library(robonix SHARED
     src/dym_hook.c
     src/robflex_api.c
+    src/robflex_config.c
 )
 
 if(HAS_CJSON_SUBMODULE)

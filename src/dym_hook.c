@@ -22,7 +22,7 @@
 #include <robflex_api.h>
 #include <stdatomic.h>
 #include <errno.h>
-
+#include <robflex_config.h>
 
 void* _init_shmem_data(const char *shmem_name);
 __thread SystemData *g_shmem_data = NULL;
@@ -35,14 +35,18 @@ __thread uint64_t avg_timecost_ns = DEFUALT_PERIOD_TIME_IN_NS;
 
 // 异步信号处理函数，负责主动控制程序的吞吐
 __thread LocalContext loc_ctx = {0};
+__thread khash_t(EventMap)* event_map = NULL;
+// context safe used
+__thread atomic_int in_critical; 
+__thread atomic_int n_signal_pendings;
 
 
 inline void set_perf_ctrl_cpi_atomic(int value_in_us) {
     atomic_store(&loc_ctx.aux.norm.time_slice_ns, max(1, value_in_us) * 1000);
 }
 
-inline unsigned long long get_perf_ctrl_cpi_atomic() {
-    return atomic_load(&loc_ctx.aux.norm.time_slice_ns);
+inline unsigned long long get_perf_ctrl_cpi_atomic(LocalContext* ctx) {
+    return atomic_load(&ctx->aux.norm.time_slice_ns);
 }
 
 // perf_event_open 系统调用包装
@@ -69,9 +73,9 @@ static int futex_wait_timeout(_Atomic int *uaddr, int expected, uint64_t timeout
     return syscall(SYS_futex, (int *)uaddr, FUTEX_WAIT, expected, &ts, NULL, 0);
 }
 
-void handle_tick_vsleep() {
-    const uint64_t target_time_ns = get_perf_ctrl_cpi_atomic();
-    struct YieldDemand *yd = &loc_ctx.aux.norm;
+void handle_tick_vsleep(LocalContext* ctx) {
+    const uint64_t target_time_ns = get_perf_ctrl_cpi_atomic(ctx);
+    struct YieldDemand *yd = &ctx->aux.norm;
     long long time_budgets = yd->time_budgets;
 
     now = get_time_ns();
@@ -98,10 +102,10 @@ void handle_tick_vsleep() {
     yd->time_budgets = time_budgets;
 }
 
-void handle_tick_predetermined() {
-    const uint64_t target_time_ns = get_perf_ctrl_cpi_atomic();  // 1ms = 1,000,000 纳秒
+void handle_tick_predetermined(LocalContext* ctx) {
+    const uint64_t target_time_ns = get_perf_ctrl_cpi_atomic(ctx);  // 1ms = 1,000,000 纳秒
     enum SystemBusyDegree busy_degree = robflex_system_busy_degree();
-    struct YieldDemand* yd = &loc_ctx.aux.norm;
+    struct YieldDemand* yd = &ctx->aux.norm;
 
     long long time_budgets = yd->time_budgets;
 
@@ -134,10 +138,10 @@ void handle_tick_predetermined() {
     yd->time_budgets = time_budgets;
 }
 
-void handle_tick_yielding() {
-    const uint64_t target_time_ns = get_perf_ctrl_cpi_atomic();  // 1ms = 1,000,000 纳秒
+void handle_tick_yielding(LocalContext* ctx) {
+    const uint64_t target_time_ns = get_perf_ctrl_cpi_atomic(ctx);  // 1ms = 1,000,000 纳秒
     enum SystemBusyDegree busy_degree = robflex_system_busy_degree();
-    struct YieldDemand* yd = &loc_ctx.aux.norm;
+    struct YieldDemand* yd = &ctx->aux.norm;
 
     long long time_budgets = yd->time_budgets;
 
@@ -169,11 +173,11 @@ void handle_tick_yielding() {
     
 }
 
-void handle_tick_latency_oriented() {
+void handle_tick_latency_oriented(LocalContext* ctx) {
     enum SystemBusyDegree busy_degree = robflex_system_busy_degree();
     now = get_time_ns();
 
-    struct LatencyDemand* ld = &loc_ctx.aux.lat;
+    struct LatencyDemand* ld = &ctx->aux.lat;
     uint64_t hist_ncycle = ld->hist_ncycle;
     uint64_t used_ncycle = ld->used_ncycle;
     uint64_t target_lat = ld->target_lat;
@@ -214,25 +218,40 @@ void handle_tick_latency_oriented() {
     return;
 }
 
-void handle_tick_immediate() {
+void handle_tick_immediate(LocalContext* ctx) {
     return;
 }
 
 void handle_tick() {
     interrupt_count++;
 
-    switch (loc_ctx.policy) {
+    int highest_level = loc_ctx.level;
+    LocalContext* ctx = &loc_ctx;
+    khint_t k;
+
+    for (k = kh_begin(event_map); k != kh_end(event_map); ++k) {
+        if (kh_exist(event_map, k) && robflex_test_event(kh_key(event_map, k))) {
+            LocalContext *vctx = &kh_value(event_map, k);
+            int vlevel = vctx->level;
+            if(vlevel > highest_level){
+                highest_level = vlevel;
+                ctx = vctx;
+            }
+        }
+    }
+
+    switch (ctx->policy) {
         case PREDETERMINED:
-            handle_tick_vsleep();
+            handle_tick_vsleep(ctx);
             break;
         case YIELDING:
-            handle_tick_yielding();
+            handle_tick_yielding(ctx);
             break;
         case LATENCY_ORIENTED:
-            handle_tick_latency_oriented();
+            handle_tick_latency_oriented(ctx);
             break;
         case IMMEDIATE:
-            handle_tick_immediate();
+            handle_tick_immediate(ctx);
             break;
         default:
             break;
@@ -243,9 +262,9 @@ void handle_tick() {
 }
 
 void instruction_interrupt_handler(int signo, siginfo_t *info, void *context) {
-    if (atomic_load_explicit(&loc_ctx.in_critical, memory_order_relaxed)) {
+    if (atomic_load_explicit(&in_critical, memory_order_relaxed)) {
         // handle the tick later
-        atomic_fetch_add(&loc_ctx.n_signal_pendings, 1);
+        atomic_fetch_add(&n_signal_pendings, 1);
         return;
     }
 
@@ -287,8 +306,17 @@ int setup_perf_ctrl() {
         perf_fd = 0;
     }
 
-    // reset local context
+    if (event_map) {
+        kh_destroy(EventMap, event_map);
+        event_map = NULL;
+    }
+    event_map = kh_init(EventMap);
+    if (event_map == NULL) {
+        return 1;
+    }
+
     robflex_init_local_context(get_runmode_env());
+    (void)setup_config_from_file(NULL);
 
     struct perf_event_attr attr;
     struct sigaction sa;
@@ -364,12 +392,17 @@ int setup_perf_ctrl() {
 
 void perf_ctrl_cleanup() {
     if (perf_fd > 0) {
-        robflex_log_message(gettid(), "target_ns:%llu, instr_cycles:%llu", get_perf_ctrl_cpi_atomic(), get_instr_slice());
+        robflex_log_message(gettid(), "target_ns:%llu, instr_cycles:%llu", get_perf_ctrl_cpi_atomic(&loc_ctx), get_instr_slice());
         robflex_log_message(gettid(), "perf_ctrl_cleanup, with avg_timecost_ns: %lld us, interrupt times: %d, sleeped time: %llu", avg_timecost_ns/1000, interrupt_count, sleeped_time);
 
         ioctl(perf_fd, PERF_EVENT_IOC_DISABLE, 0);
         close(perf_fd);
         perf_fd = 0;
+    }
+
+    if (event_map) {
+        kh_destroy(EventMap, event_map);
+        event_map = NULL;
     }
     // if perf_fd is not open, do nothing, may be env ROBFLEX_ENABLE_FEATURES is not set
 }

@@ -333,6 +333,42 @@ int do_update_ctrl_time_cost(const cJSON *root) {
     return sigqueue(tid->valueint, CPI_SET_SIGNAL, val);
 }
 
+int do_apply_event(const cJSON *root) {
+    cJSON *event_name = cJSON_GetObjectItem(root, "event_name");
+    cJSON *timeout = cJSON_GetObjectItem(root, "timeout");
+    cJSON *strength = cJSON_GetObjectItem(root, "strength");
+    if (!event_name || !strength) {
+        fprintf(stderr, "Missing required fields for apply_event\n");
+        return -1;
+    }
+
+    printf("apply_event: event_name: %s, timeout: %d, strength: %d\n", event_name->valuestring, timeout->valueint, strength->valueint);
+
+    int event_idx = robflex_get_event_idx(event_name->valuestring);
+    if(event_idx == -1){
+        fprintf(stderr, "Invalid event name: %s\n", event_name->valuestring);
+        return -1;
+    }
+
+    return set_event_bit(ptr_shmem, event_idx);
+}
+
+int do_cancel_event(const cJSON *root) {
+    cJSON *event_name = cJSON_GetObjectItem(root, "event_name");
+    cJSON *strength = cJSON_GetObjectItem(root, "strength");
+    if (!event_name ) {
+        fprintf(stderr, "Missing required fields for cancel_event\n");
+        return -1;
+    }
+
+    int event_idx = robflex_get_event_idx(event_name->valuestring);
+    if(event_idx == -1){
+        fprintf(stderr, "Invalid event name: %s\n", event_name->valuestring);
+        return -1;
+    }
+    return unset_event_bit(ptr_shmem, event_idx);
+}
+
 int cmd_dispatcher(const cJSON *root) {
     cJSON *cmd = cJSON_GetObjectItem(root, "cmd");
     if (!cmd) {
@@ -348,6 +384,10 @@ int cmd_dispatcher(const cJSON *root) {
         return do_log_message(root);
     } else if (strcmp(cmd->valuestring, "update_ctrl_time_cost") == 0) {
         return do_update_ctrl_time_cost(root);
+    } else if (strcmp(cmd->valuestring, "apply_event") == 0) {
+        return do_apply_event(root);
+    } else if (strcmp(cmd->valuestring, "cancel_event") == 0) {
+        return do_cancel_event(root);
     } else {
         fprintf(stderr, "Unknown command: %s\n", cmd->valuestring);
         return -1;
@@ -406,7 +446,7 @@ int main() {
         fprintf(stderr, "Failed to set up Unix Socket Server\n");
         return 1;
     }
-
+    
     if (get_shmem_data(SHMEM_NAME) == NULL) {
         fprintf(stderr, "Failed to init shared memory for system load\n");
         return 1;

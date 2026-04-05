@@ -61,15 +61,20 @@ int robflex_log_message(pid_t tid, const char *message, ...);
 int robflex_update_ctrl_time_cost(pid_t tid, int value_in_us);
 
 // event management(For global/local context)
-int create_event();
-int declare_event();
-int release_event();
-int attach_context_for_event();
-int deatach_context_for_event();
-int get_policy_for_event();
+int robflex_create_event(const char* event_name);
+int robflex_delete_event(const char* event_name);
+int robflex_apply_event(const char* event_name, uint64_t timeout, int strength);
+int robflex_cancel_event(const char* event_name, int strength);
+int robflex_attach_context_for_event(const char* event_name,  enum RunPolicy, union uAuxData, uint32_t level);
+int robflex_dettach_context_for_event(const char* event_name);
+int robflex_get_policy_for_event(const char* event_name);
+bool robflex_test_event(int event_idx);
 
 // local context management
 extern __thread LocalContext loc_ctx;
+extern __thread atomic_int in_critical; 
+extern __thread atomic_int n_signal_pendings;
+extern __thread khash_t(EventMap)* event_map;
 int robflex_init_local_context(enum RunPolicy mode);
 int robflex_set_cycles_for_tick(uint64_t cycles);
 int robflex_clear_time_budget();
