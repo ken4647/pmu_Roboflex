@@ -11,5 +11,5 @@ export LD_PRELOAD="${_SCRIPT_DIR}/../build/librobonix.so"
 export ROBFLEX_ENABLE_FEATURES=1
 export ROBFLEX_CYCLES_NUM=1000000
 export ROBFLEX_RUNMODE=PREDETERMINED
-export ROBFLEX_CONFIG_PATH=${_SCRIPT_DIR}/../benchmark/example/config.rbf.yaml
+export ROBFLEX_CONFIG_PATH=${_SCRIPT_DIR}/../benchmark/example/config.rbf.json
 # export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${_SCRIPT_DIR}/../build

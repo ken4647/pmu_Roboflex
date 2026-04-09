@@ -1,11 +1,11 @@
 {
   "name": "example_config",
-    "default": {
-        "policy": "yielding",
-        "period_time_ns": 1000000,
-        "period_cycles_quota": 1000000
-    },
   "policy_table": {
+    "default": {
+      "policy": "predetermined",
+      "period_time_ns": 1000000,
+      "period_cycles_quota": 1000000
+    },
     "high_speed": {
       "policy": "immediate",
       "level": 1
