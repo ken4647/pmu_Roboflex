@@ -384,6 +384,7 @@ struct ChainContext robflex_shot_on_latency(){
 
 int robflex_chained_from_latency(struct ChainContext chain_ctx, int feedback_percent){
     atomic_store(&in_critical, 1);
+    loc_ctx.aux.lat.start_time = robflex_get_time_ns();
     loc_ctx.aux.lat.total_latency = chain_ctx.total_latency;
     loc_ctx.aux.lat.used_latency = chain_ctx.used_latency;
 
