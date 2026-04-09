@@ -186,30 +186,22 @@ void handle_tick_latency_oriented(LocalContext* ctx) {
     uint64_t cycle_slice = get_instr_slice();
     uint64_t pass_ns = now - past;
 
-    long long diff_ncycle = (long long)hist_ncycle - (long long)used_ncycle + cycle_slice;
+    long long rest_ncycle = (long long)hist_ncycle - (long long)used_ncycle + cycle_slice;
     long long diff_time = (long long)now - (long long)start_time;
-    long long time_budgets = (long long)target_lat - diff_time;
+    long long rest_time = (long long)target_lat - diff_time;
 
     ld->used_ncycle += cycle_slice;
-    if(time_budgets <= 1000000 || busy_degree == SYSTEM_IDLE) { // only x ms left, so full run
-        past = get_time_ns();
-        return;
-    }else if(busy_degree == SYSTEM_MODERATE){ // moderate busy, just yield
-        sched_yield();
-        past = get_time_ns();
-        return;
-    }
 
     long long period_assume = 0;
-    if(diff_ncycle > 0) { // need to wait for next cycle
-        period_assume = time_budgets*cycle_slice/diff_ncycle;
-        // printf("period_assume: %llu, pass_ns: %llu, sleep_ns: %lld, time_budgets: %lld, hist_ncycle: %llu, cycle_slice: %llu\n", period_assume, pass_ns, period_assume - (long long)pass_ns - 1000000, time_budgets, hist_ncycle, cycle_slice);
-        long long sleep_ns = period_assume - (long long)pass_ns - 1000000;
+    if(rest_ncycle > 0) { // need to wait for next cycle
+        period_assume = rest_time*cycle_slice/rest_ncycle-1000000;
+        // printf("period_assume: %llu, pass_ns: %llu, sleep_ns: %lld, rest_time: %lld, hist_ncycle: %llu, cycle_slice: %llu\n", period_assume, pass_ns, period_assume - (long long)pass_ns - 1000000, rest_time, hist_ncycle, cycle_slice);
+        long long sleep_ns = period_assume - (long long)pass_ns;
         if(sleep_ns > 1000000) {
-            struct timespec sleep_ts;
-            sleep_ts.tv_sec = 0;
-            sleep_ts.tv_nsec = sleep_ns;
-            nanosleep(&sleep_ts, NULL);
+            int ret = futex_wait_timeout(&g_shmem_data->futex_wake_seq, 0, sleep_ns);
+            if (ret == -1 && errno != EAGAIN && errno != EINTR && errno != ETIMEDOUT) {
+                // ignore unexpected wait errors, keep throttling loop robust
+            }
         }
     }
     
@@ -242,10 +234,10 @@ void handle_tick() {
 
     switch (ctx->policy) {
         case PREDETERMINED:
-            handle_tick_vsleep(ctx);
+            handle_tick_yielding(ctx);
             break;
         case YIELDING:
-            handle_tick_yielding(ctx);
+            handle_tick_vsleep(ctx);
             break;
         case LATENCY_ORIENTED:
             handle_tick_latency_oriented(ctx);
