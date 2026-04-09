@@ -74,7 +74,7 @@ bool robflex_test_event(int event_idx);
 extern __thread LocalContext loc_ctx;
 extern __thread atomic_int in_critical; 
 extern __thread atomic_int n_signal_pendings;
-extern __thread khash_t(EventMap)* event_map;
+extern __thread EventContextMap event_map;
 int robflex_init_local_context(enum RunPolicy mode);
 int robflex_set_cycles_for_tick(uint64_t cycles);
 int robflex_clear_time_budget();
@@ -82,7 +82,8 @@ int robflex_set_time_for_throttle(uint64_t time_ns);
 int robflex_set_as_immediate(uint64_t prio);    // will sched it as fifo
 int robflex_set_as_latency_flick(uint64_t lat_ns, uint64_t base_ns);  // set latency finish
 int robflex_add_runcycle(uint64_t runcycle);
-int robflex_shot_on_latency();                  // clear latency inner status, and restart time point
+struct ChainContext robflex_shot_on_latency();                // clear latency inner status, and restart time point
+int robflex_chained_from_latency(struct ChainContext chain_ctx, int feedback_percent);
 int robflex_switch_context(LocalContext *new_context, LocalContext *saved_context);
 int robflex_switch_context_block(LocalContext *new_context, LocalContext *saved_context); // used for test
 

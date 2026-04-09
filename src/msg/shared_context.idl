@@ -1,0 +1,6 @@
+struct ChainContext {
+    uint64 total_latency;
+    uint64 used_latency;
+    uint64 local_target_latency;
+    uint64 local_used_latency;
+};

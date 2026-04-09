@@ -200,17 +200,11 @@ int robflex_cancel_event(const char* event_name, int strength){
 int robflex_attach_context_for_event(const char *event_name, enum RunPolicy epolicy,
                                      union uAuxData data, uint32_t level)
 {
-    if (event_name == NULL || event_map == NULL) {
+    if (event_name == NULL) {
         return -1;
     }
     int event_idx = (int)robflex_get_event_idx(event_name);
     if (event_idx == (int)ROBFLEX_EVENT_NONE) {
-        return -1;
-    }
-
-    int absent = 0;
-    khint_t key = kh_put(EventMap, event_map, event_idx, &absent);
-    if (absent < 0) {
         return -1;
     }
 
@@ -219,43 +213,35 @@ int robflex_attach_context_for_event(const char *event_name, enum RunPolicy epol
         .aux = data,
         .level = (int)level,
     };
-    kh_value(event_map, key) = ctx;
-    return 0;
+    return robflex_event_table_upsert(&event_map, event_idx, &ctx);
 }
 
 int robflex_dettach_context_for_event(const char *event_name)
 {
-    if (event_name == NULL || event_map == NULL) {
+    if (event_name == NULL) {
         return -1;
     }
     int event_idx = (int)robflex_get_event_idx(event_name);
     if (event_idx == (int)ROBFLEX_EVENT_NONE) {
         return -1;
     }
-
-    khint_t k = kh_get(EventMap, event_map, event_idx);
-    if (k == kh_end(event_map)) {
-        return -1;
-    }
-    kh_del(EventMap, event_map, k);
-    return 0;
+    return robflex_event_table_erase(&event_map, event_idx);
 }
 
 int robflex_get_policy_for_event(const char *event_name)
 {
-    if (event_name == NULL || event_map == NULL) {
+    if (event_name == NULL) {
         return -1;
     }
     int event_idx = (int)robflex_get_event_idx(event_name);
     if (event_idx == (int)ROBFLEX_EVENT_NONE) {
         return -1;
     }
-
-    khint_t k = kh_get(EventMap, event_map, event_idx);
-    if (k == kh_end(event_map)) {
+    LocalContext *ctx = robflex_event_table_get_ctx(&event_map, event_idx);
+    if (ctx == NULL) {
         return -1;
     }
-    return (int)kh_value(event_map, k).policy;
+    return (int)ctx->policy;
 }
 
 bool robflex_test_event(int event_idx){
@@ -335,6 +321,8 @@ int robflex_set_as_latency_flick(uint64_t lat_ns, uint64_t base_ns){
     loc_ctx.aux.lat.target_lat = lat_ns;
     loc_ctx.aux.lat.start_time = robflex_get_time_ns();
     loc_ctx.aux.lat.hist_ncycle = base_ns;
+    loc_ctx.aux.lat.total_latency = 0;
+    loc_ctx.aux.lat.used_latency = 0;
     atomic_store(&in_critical, 0);
     while(atomic_exchange(&n_signal_pendings, 0)){
         handle_tick();
@@ -352,18 +340,24 @@ int robflex_add_runcycle(uint64_t runcycle){
     return 0;
 }
 
-int robflex_shot_on_latency(){
+struct ChainContext robflex_shot_on_latency(){
     atomic_store(&in_critical, 1);
     if(loc_ctx.policy != LATENCY_ORIENTED){
         atomic_store(&in_critical, 0);
         while(atomic_exchange(&n_signal_pendings, 0)){
             handle_tick();
         }
-        return -1;
+        return (struct ChainContext){0};
     }
     uint64_t current_time = robflex_get_time_ns();
     uint64_t pass_time = current_time - loc_ctx.aux.lat.start_time;
     long long rest_time = (long long)loc_ctx.aux.lat.target_lat - (long long)pass_time;
+    struct ChainContext chain_ctx = {
+        .total_latency = loc_ctx.aux.lat.total_latency + loc_ctx.aux.lat.target_lat,
+        .used_latency = loc_ctx.aux.lat.used_latency + pass_time,
+        .local_target_latency = loc_ctx.aux.lat.target_lat,
+        .local_used_latency = pass_time,
+    };
     loc_ctx.aux.lat.hist_ncycle = loc_ctx.aux.lat.hist_ncycle*0.5 + loc_ctx.aux.lat.used_ncycle*0.5;
     // loc_ctx.aux.lat.start_time = current_time;
     loc_ctx.aux.lat.used_ncycle = 0;
@@ -374,15 +368,30 @@ int robflex_shot_on_latency(){
     }
 
     // printf("target latency: %llu, pass time: %llu, rest time: %lld, hist_ncycle: %llu, used_ncycle: %llu\n", loc_ctx.aux.lat.target_lat, pass_time, rest_time, loc_ctx.aux.lat.hist_ncycle, loc_ctx.aux.lat.used_ncycle);
-    if(rest_time > 1000000) {
-        struct timespec sleep_ts;
-        sleep_ts.tv_sec = 0;
-        sleep_ts.tv_nsec = rest_time - 1000000;
-        robflex_log_message(gettid(), "rest_time:%llu, sleep_ns:%llu", rest_time, rest_time - 1000000);
-        nanosleep(&sleep_ts, NULL);
-    }
+    // if(rest_time > 1000000) {
+    //     struct timespec sleep_ts;
+    //     sleep_ts.tv_sec = 0;
+    //     sleep_ts.tv_nsec = rest_time - 1000000;
+    //     robflex_log_message(gettid(), "rest_time:%llu, sleep_ns:%llu", rest_time, rest_time - 1000000);
+    //     nanosleep(&sleep_ts, NULL);
+    // }
 
     loc_ctx.aux.lat.start_time = robflex_get_time_ns();
+    loc_ctx.aux.lat.total_latency = 0;
+    loc_ctx.aux.lat.used_latency = 0;
+    return chain_ctx;
+}
+
+int robflex_chained_from_latency(struct ChainContext chain_ctx, int feedback_percent){
+    atomic_store(&in_critical, 1);
+    loc_ctx.aux.lat.total_latency = chain_ctx.total_latency;
+    loc_ctx.aux.lat.used_latency = chain_ctx.used_latency;
+
+    loc_ctx.aux.lat.lat_bias = ((long long)chain_ctx.local_target_latency - (long long)chain_ctx.local_used_latency) * feedback_percent / 100;
+    atomic_store(&in_critical, 0);
+    while(atomic_exchange(&n_signal_pendings, 0)){
+        handle_tick();
+    }
     return 0;
 }
 

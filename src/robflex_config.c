@@ -106,10 +106,6 @@ int parse_config_file(cJSON *config_json)
         return 1;
     }
 
-    if (event_map == NULL) {
-        return 1;
-    }
-
     cJSON *entry;
     cJSON_ArrayForEach(entry, policy_table)
     {
@@ -133,12 +129,9 @@ int parse_config_file(cJSON *config_json)
             return 1;
         }
 
-        int absent = 0;
-        khint_t k = kh_put(EventMap, event_map, event_idx, &absent);
-        if (absent < 0) {
+        if (robflex_event_table_upsert(&event_map, event_idx, &ev_ctx) != 0) {
             return 1;
         }
-        kh_value(event_map, k) = ev_ctx;
     }
 
     return 0;

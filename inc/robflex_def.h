@@ -8,8 +8,9 @@
 #include <stdatomic.h>
 #include <pthread.h>
 #include <robflex_event.h>
-
+#ifdef ROBFLEX_USE_KHASH_EVENT_MAP
 #include "khash.h"
+#endif
 
 #define PERF_SIGNAL (SIGRTMIN+1)
 #define CPI_SET_SIGNAL (SIGRTMIN+2)
@@ -99,6 +100,13 @@ static inline bool test_event_bit(SystemData *sd, int event_idx)
     return (word & ((uint64_t)1u << bi)) != 0;
 }
 
+struct ChainContext {
+    uint64_t total_latency;
+    uint64_t used_latency;
+    uint64_t local_target_latency;
+    uint64_t local_used_latency;
+};
+
 enum RunPolicy {
     YIELDING = 0,   // sleep/yield when tick occurs (depend on System Status)
     PREDETERMINED,  // run as expected, whatever system is busy or idle
@@ -118,6 +126,11 @@ struct LatencyDemand {
     uint64_t start_time;
     uint64_t hist_ncycle;
     uint64_t used_ncycle;
+
+    long long lat_bias;
+
+    uint64_t total_latency;
+    uint64_t used_latency;
 };
 
 struct HandlerDemand {
@@ -143,7 +156,166 @@ typedef struct LocalContext{
     uint64_t avg_timecost_ns;
 }__attribute__((aligned(8))) LocalContext;
 
+#define ROBFLEX_MAX_LOCAL_EVENT_CTX 8
 
+typedef struct EventContextEntry {
+    int event_idx;
+    bool in_use;
+    LocalContext ctx;
+} EventContextEntry;
+
+typedef struct EventContextTable {
+    int count;
+    EventContextEntry entries[ROBFLEX_MAX_LOCAL_EVENT_CTX];
+} EventContextTable;
+
+#ifdef ROBFLEX_USE_KHASH_EVENT_MAP
 KHASH_MAP_INIT_INT(EventMap, LocalContext) // event_idx:int -> LocalContext
+typedef khash_t(EventMap)* EventContextMap;
+
+static inline int robflex_event_table_init(EventContextMap *table)
+{
+    if (table == NULL) {
+        return -1;
+    }
+    *table = kh_init(EventMap);
+    return (*table != NULL) ? 0 : -1;
+}
+
+static inline void robflex_event_table_destroy(EventContextMap *table)
+{
+    if (table != NULL && *table != NULL) {
+        kh_destroy(EventMap, *table);
+        *table = NULL;
+    }
+}
+
+static inline void robflex_event_table_reset(EventContextMap *table)
+{
+    if (table != NULL && *table != NULL) {
+        kh_clear(EventMap, *table);
+    }
+}
+
+static inline LocalContext *robflex_event_table_get_ctx(EventContextMap *table, int event_idx)
+{
+    if (table == NULL || *table == NULL || event_idx <= (int)ROBFLEX_EVENT_NONE) {
+        return NULL;
+    }
+    khint_t k = kh_get(EventMap, *table, event_idx);
+    if (k == kh_end(*table)) {
+        return NULL;
+    }
+    return &kh_value(*table, k);
+}
+
+static inline int robflex_event_table_upsert(EventContextMap *table, int event_idx, const LocalContext *ctx)
+{
+    if (table == NULL || *table == NULL || ctx == NULL || event_idx <= (int)ROBFLEX_EVENT_NONE) {
+        return -1;
+    }
+    int absent = 0;
+    khint_t key = kh_put(EventMap, *table, event_idx, &absent);
+    if (absent < 0) {
+        return -1;
+    }
+    kh_value(*table, key) = *ctx;
+    return 0;
+}
+
+static inline int robflex_event_table_erase(EventContextMap *table, int event_idx)
+{
+    if (table == NULL || *table == NULL || event_idx <= (int)ROBFLEX_EVENT_NONE) {
+        return -1;
+    }
+    khint_t k = kh_get(EventMap, *table, event_idx);
+    if (k == kh_end(*table)) {
+        return -1;
+    }
+    kh_del(EventMap, *table, k);
+    return 0;
+}
+
+#else
+typedef EventContextTable EventContextMap;
+
+static inline int robflex_event_table_init(EventContextMap *table)
+{
+    if (table == NULL) {
+        return -1;
+    }
+    table->count = 0;
+    for (int i = 0; i < ROBFLEX_MAX_LOCAL_EVENT_CTX; ++i) {
+        table->entries[i].event_idx = (int)ROBFLEX_EVENT_NONE;
+        table->entries[i].in_use = false;
+    }
+    return 0;
+}
+
+static inline void robflex_event_table_destroy(EventContextMap *table)
+{
+    (void)table;
+}
+
+static inline EventContextEntry *robflex_event_table_find_entry(EventContextMap *table, int event_idx)
+{
+    if (table == NULL || event_idx <= (int)ROBFLEX_EVENT_NONE) {
+        return NULL;
+    }
+    for (int i = 0; i < ROBFLEX_MAX_LOCAL_EVENT_CTX; ++i) {
+        EventContextEntry *entry = &table->entries[i];
+        if (entry->in_use && entry->event_idx == event_idx) {
+            return entry;
+        }
+    }
+    return NULL;
+}
+
+static inline int robflex_event_table_upsert(EventContextMap *table, int event_idx, const LocalContext *ctx)
+{
+    if (table == NULL || ctx == NULL || event_idx <= (int)ROBFLEX_EVENT_NONE) {
+        return -1;
+    }
+
+    EventContextEntry *existing = robflex_event_table_find_entry(table, event_idx);
+    if (existing != NULL) {
+        existing->ctx = *ctx;
+        return 0;
+    }
+
+    for (int i = 0; i < ROBFLEX_MAX_LOCAL_EVENT_CTX; ++i) {
+        EventContextEntry *entry = &table->entries[i];
+        if (!entry->in_use) {
+            entry->in_use = true;
+            entry->event_idx = event_idx;
+            entry->ctx = *ctx;
+            table->count++;
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
+static inline int robflex_event_table_erase(EventContextMap *table, int event_idx)
+{
+    EventContextEntry *entry = robflex_event_table_find_entry(table, event_idx);
+    if (entry == NULL) {
+        return -1;
+    }
+    entry->in_use = false;
+    entry->event_idx = (int)ROBFLEX_EVENT_NONE;
+    if (table->count > 0) {
+        table->count--;
+    }
+    return 0;
+}
+
+static inline LocalContext *robflex_event_table_get_ctx(EventContextMap *table, int event_idx)
+{
+    EventContextEntry *entry = robflex_event_table_find_entry(table, event_idx);
+    return (entry == NULL) ? NULL : &entry->ctx;
+}
+#endif
 
 #endif // ROBFLEX_DEF_H

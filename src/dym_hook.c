@@ -35,7 +35,7 @@ __thread uint64_t avg_timecost_ns = DEFUALT_PERIOD_TIME_IN_NS;
 
 // 异步信号处理函数，负责主动控制程序的吞吐
 __thread LocalContext loc_ctx = {0};
-__thread khash_t(EventMap)* event_map = NULL;
+__thread EventContextMap event_map = {0};
 // context safe used
 __thread atomic_int in_critical; 
 __thread atomic_int n_signal_pendings;
@@ -180,7 +180,7 @@ void handle_tick_latency_oriented(LocalContext* ctx) {
     struct LatencyDemand* ld = &ctx->aux.lat;
     uint64_t hist_ncycle = ld->hist_ncycle;
     uint64_t used_ncycle = ld->used_ncycle;
-    uint64_t target_lat = ld->target_lat;
+    uint64_t target_lat = ld->target_lat > -ld->lat_bias ? ld->target_lat + ld->lat_bias : 0;
     uint64_t start_time = ld->start_time;
     uint64_t now = get_time_ns();
     uint64_t cycle_slice = get_instr_slice();
@@ -219,18 +219,36 @@ void handle_tick() {
 
     int highest_level = loc_ctx.level;
     LocalContext* ctx = &loc_ctx;
-    khint_t k;
-
-    for (k = kh_begin(event_map); k != kh_end(event_map); ++k) {
-        if (kh_exist(event_map, k) && robflex_test_event(kh_key(event_map, k))) {
-            LocalContext *vctx = &kh_value(event_map, k);
+#ifdef ROBFLEX_USE_KHASH_EVENT_MAP
+    if (event_map != NULL) {
+        khint_t k;
+        for (k = kh_begin(event_map); k != kh_end(event_map); ++k) {
+            if (kh_exist(event_map, k) && robflex_test_event(kh_key(event_map, k))) {
+                LocalContext *vctx = &kh_value(event_map, k);
+                int vlevel = vctx->level;
+                if(vlevel > highest_level){
+                    highest_level = vlevel;
+                    ctx = vctx;
+                }
+            }
+        }
+    }
+#else
+    for (int i = 0; i < ROBFLEX_MAX_LOCAL_EVENT_CTX; ++i) {
+        EventContextEntry *entry = &event_map.entries[i];
+        if (!entry->in_use) {
+            continue;
+        }
+        if (robflex_test_event(entry->event_idx)) {
+            LocalContext *vctx = &entry->ctx;
             int vlevel = vctx->level;
-            if(vlevel > highest_level){
+            if (vlevel > highest_level) {
                 highest_level = vlevel;
                 ctx = vctx;
             }
         }
     }
+#endif
 
     switch (ctx->policy) {
         case PREDETERMINED:
@@ -298,12 +316,8 @@ int setup_perf_ctrl() {
         perf_fd = 0;
     }
 
-    if (event_map) {
-        kh_destroy(EventMap, event_map);
-        event_map = NULL;
-    }
-    event_map = kh_init(EventMap);
-    if (event_map == NULL) {
+    robflex_event_table_destroy(&event_map);
+    if (robflex_event_table_init(&event_map) != 0) {
         return 1;
     }
 
@@ -392,10 +406,7 @@ void perf_ctrl_cleanup() {
         perf_fd = 0;
     }
 
-    if (event_map) {
-        kh_destroy(EventMap, event_map);
-        event_map = NULL;
-    }
+    robflex_event_table_destroy(&event_map);
     // if perf_fd is not open, do nothing, may be env ROBFLEX_ENABLE_FEATURES is not set
 }
 
