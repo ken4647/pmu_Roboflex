@@ -551,6 +551,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Failed to init shared memory for system load\n");
         return 1;
     }
+    for (int i = 0; i < MAX_EVENT_NUM/(sizeof(uint64_t)*8); i++) {
+        atomic_store(&ptr_shmem->event_bits[i], 0);
+    }
     atomic_store(&ptr_shmem->futex_wake_seq, 0);
 
     if (pthread_create(&monitor_tid, NULL, cpu_monitor_thread, NULL) != 0) {
