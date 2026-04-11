@@ -25,10 +25,13 @@
 #include <pthread.h>
 #include <time.h>
 #include <stdint.h>
+#include <errno.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <linux/futex.h>
 #include <limits.h>
+#include <signal.h>
 
 #include <cJSON.h>
 
@@ -54,6 +57,12 @@ typedef struct {
 #define CPU_GAP_THRESHOLD 3000
 
 static SystemData *ptr_shmem = NULL;
+static volatile sig_atomic_t g_running = 1;
+static pid_t g_xserver_pid = -1;
+
+#define DEFAULT_XSERVER_PATH "third_party/xsched/output/bin/xserver"
+#define DEFAULT_XSERVER_POLICY "HPF"
+#define DEFAULT_XSERVER_PORT "50000"
 
 static enum SystemBusyDegree get_system_busy_degree(float load_1s) {
     if (load_1s < 30.0f) {
@@ -259,6 +268,53 @@ int setup_unix_socket(struct UnixSocketServer *server) {
     return 0;
 }
 
+static void signal_handler(int signo) {
+    (void)signo;
+    g_running = 0;
+}
+
+static int setup_signal_handlers(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = signal_handler;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGINT, &sa, NULL) != 0) {
+        perror("sigaction SIGINT");
+        return -1;
+    }
+    if (sigaction(SIGTERM, &sa, NULL) != 0) {
+        perror("sigaction SIGTERM");
+        return -1;
+    }
+    return 0;
+}
+
+static int start_xsched_xserver(const char *xserver_path, const char *policy, const char *port) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork xserver");
+        return -1;
+    }
+    if (pid == 0) {
+        execl(xserver_path, xserver_path, policy, port, (char *)NULL);
+        perror("execl xserver");
+        _exit(127);
+    }
+    g_xserver_pid = pid;
+    printf("XSched xserver started: pid=%d, path=%s, policy=%s, port=%s\n",
+           pid, xserver_path, policy, port);
+    return 0;
+}
+
+static void stop_xsched_xserver(void) {
+    if (g_xserver_pid <= 0) return;
+    if (kill(g_xserver_pid, SIGTERM) != 0 && errno != ESRCH) {
+        perror("kill xserver");
+    }
+    (void)waitpid(g_xserver_pid, NULL, 0);
+    g_xserver_pid = -1;
+}
+
 int do_sched_setscheduler(const cJSON *root) {
     cJSON *tid = cJSON_GetObjectItem(root, "tid");
     cJSON *policy = cJSON_GetObjectItem(root, "policy");
@@ -361,6 +417,8 @@ int do_cancel_event(const cJSON *root) {
         return -1;
     }
 
+    printf("cancel_event: event_name: %s, strength: %d\n", event_name->valuestring, strength->valueint);
+
     int event_idx = robflex_get_event_idx(event_name->valuestring);
     if(event_idx == -1){
         fprintf(stderr, "Invalid event name: %s\n", event_name->valuestring);
@@ -403,6 +461,9 @@ void handle_client_request(struct UnixSocketServer *server) {
     ssize_t num_bytes = recvfrom(server->socket_fd, buffer, sizeof(buffer) - 1, 0,
                                  (struct sockaddr *)&client_addr, &client_addr_len);
     if (num_bytes < 0) {
+        if (errno == EINTR) {
+            return;
+        }
         perror("recvfrom");
         return;
     }
@@ -425,12 +486,42 @@ void handle_client_request(struct UnixSocketServer *server) {
     return;
 }
 
-int main() {
+int main(int argc, char **argv) {
     struct UnixSocketServer server;
     pthread_t monitor_tid;
     pthread_t idle_waker_tid;
+    int enable_xsched_xserver = 0;
+    const char *xserver_path = getenv("ROBFLEX_XSERVER_PATH");
+    const char *xserver_policy = DEFAULT_XSERVER_POLICY;
+    const char *xserver_port = DEFAULT_XSERVER_PORT;
+    if (xserver_path == NULL || xserver_path[0] == '\0') {
+        xserver_path = DEFAULT_XSERVER_PATH;
+    }
     
     printf("Schedule Daemon is Starting...\n");
+
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--enable-xsched-xserver") == 0) {
+            enable_xsched_xserver = 1;
+        } else if (strcmp(argv[i], "--xserver-path") == 0 && i + 1 < argc) {
+            xserver_path = argv[++i];
+        } else if (strcmp(argv[i], "--xserver-policy") == 0 && i + 1 < argc) {
+            xserver_policy = argv[++i];
+        } else if (strcmp(argv[i], "--xserver-port") == 0 && i + 1 < argc) {
+            xserver_port = argv[++i];
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            printf("Usage: %s [--enable-xsched-xserver] [--xserver-path PATH] "
+                   "[--xserver-policy POLICY] [--xserver-port PORT]\n", argv[0]);
+            return 0;
+        } else {
+            fprintf(stderr, "Unknown argument: %s\n", argv[i]);
+            return 1;
+        }
+    }
+
+    if (setup_signal_handlers() != 0) {
+        return 1;
+    }
 
     // 检查CAP_SYS_NICE权限
     if(check_capability(CAP_SYS_NICE) != 0) {
@@ -445,6 +536,15 @@ int main() {
     if (setup_unix_socket(&server) != 0) {
         fprintf(stderr, "Failed to set up Unix Socket Server\n");
         return 1;
+    }
+
+    if (enable_xsched_xserver) {
+        if (start_xsched_xserver(xserver_path, xserver_policy, xserver_port) != 0) {
+            close(server.socket_fd);
+            return 1;
+        }
+    } else {
+        printf("XSched xserver is disabled by default; pass --enable-xsched-xserver to start it\n");
     }
     
     if (get_shmem_data(SHMEM_NAME) == NULL) {
@@ -479,9 +579,13 @@ int main() {
     }
 
     printf("Ready to receive requests:\n");
-    while(1){
+    while (g_running) {
         handle_client_request(&server);
     }
+
+    close(server.socket_fd);
+    unlink(SOCKET_PATH);
+    stop_xsched_xserver();
 
     return 0;
 }

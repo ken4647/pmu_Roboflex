@@ -13,6 +13,8 @@ ffi = FFI()
 ffi.cdef(
     """
     typedef int pid_t;
+    typedef unsigned long long uint64_t;
+    typedef unsigned int uint32_t;
 
     typedef int atomic_int;
     typedef unsigned long long atomic_ullong;
@@ -60,6 +62,15 @@ ffi.cdef(
     int robflex_set_priority(pid_t tid, int priority);
     int robflex_log_message(pid_t tid, const char *message, ...);
     int robflex_update_ctrl_time_cost(pid_t tid, int value_in_us);
+
+    int robflex_create_event(const char *event_name);
+    int robflex_delete_event(const char *event_name);
+    int robflex_apply_event(const char *event_name, uint64_t timeout, int strength);
+    int robflex_cancel_event(const char *event_name, int strength);
+    int robflex_attach_context_for_event(const char *event_name, RunPolicy epolicy, union uAuxData data, uint32_t level);
+    int robflex_dettach_context_for_event(const char *event_name);
+    int robflex_get_policy_for_event(const char *event_name);
+    _Bool robflex_test_event(int event_idx);
 
     int robflex_init_local_context(RunPolicy mode);
     int robflex_set_cycles_for_tick(uint64_t cycles);
@@ -141,6 +152,47 @@ def robflex_log_message(tid: int, fmt: str, *args) -> int:
 
 def robflex_update_ctrl_time_cost(tid: int, value_in_us: int) -> int:
     return lib.robflex_update_ctrl_time_cost(tid, value_in_us)
+
+
+def _as_c_utf8(name: str | bytes) -> bytes:
+    return name if isinstance(name, bytes) else name.encode("utf-8")
+
+
+def robflex_create_event(event_name: str | bytes) -> int:
+    return lib.robflex_create_event(_as_c_utf8(event_name))
+
+
+def robflex_delete_event(event_name: str | bytes) -> int:
+    return lib.robflex_delete_event(_as_c_utf8(event_name))
+
+
+def robflex_apply_event(event_name: str | bytes, timeout: int, strength: int) -> int:
+    return lib.robflex_apply_event(_as_c_utf8(event_name), timeout, strength)
+
+
+def robflex_cancel_event(event_name: str | bytes, strength: int) -> int:
+    return lib.robflex_cancel_event(_as_c_utf8(event_name), strength)
+
+
+def robflex_attach_context_for_event(
+    event_name: str | bytes, epolicy: int, data, level: int
+) -> int:
+    """data: ffi cdata for union uAuxData (pointer or value), e.g. ffi.new('union uAuxData *')."""
+    td = ffi.typeof(data)
+    udata = data[0] if td.kind == "pointer" else data
+    return lib.robflex_attach_context_for_event(_as_c_utf8(event_name), epolicy, udata, level)
+
+
+def robflex_dettach_context_for_event(event_name: str | bytes) -> int:
+    return lib.robflex_dettach_context_for_event(_as_c_utf8(event_name))
+
+
+def robflex_get_policy_for_event(event_name: str | bytes) -> int:
+    return lib.robflex_get_policy_for_event(_as_c_utf8(event_name))
+
+
+def robflex_test_event(event_idx: int) -> bool:
+    return bool(lib.robflex_test_event(event_idx))
 
 
 def robflex_init_local_context(mode: int) -> int:

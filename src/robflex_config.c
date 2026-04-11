@@ -143,7 +143,7 @@ int setup_config_from_file(const char *config_path_in)
     if (path == NULL) {
         return 1;
     }
-    FILE *file = fopen(path, "r");
+    FILE *file = fopen(path, "rb");
     if (file == NULL) {
         perror("fopen");
         return 1;
@@ -168,9 +168,21 @@ int setup_config_from_file(const char *config_path_in)
         fclose(file);
         return 1;
     }
-    size_t n = fread(buf, 1, (size_t)sz, file);
+    size_t total = 0;
+    while (total < (size_t)sz) {
+        size_t n = fread(buf + total, 1, (size_t)sz - total, file);
+        if (n == 0) {
+            break;
+        }
+        total += n;
+    }
+    if (total != (size_t)sz || ferror(file)) {
+        free(buf);
+        fclose(file);
+        return 1;
+    }
     fclose(file);
-    buf[n] = '\0';
+    buf[total] = '\0';
 
     cJSON *config_json = cJSON_Parse(buf);
     free(buf);
